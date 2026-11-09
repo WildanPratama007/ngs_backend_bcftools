@@ -1,0 +1,24 @@
+# Data — jangan push isinya, hanya struktur folder
+data/**
+!data/
+!data/jobs/
+!data/results/
+!data/uploads/
+!data/**/.gitkeep
+.env
+
+# Nextflow
+work/
+.nextflow/
+.nextflow.log*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db

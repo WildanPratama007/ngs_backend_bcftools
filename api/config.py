@@ -1,12 +1,12 @@
 """
 NGS Backend — Konfigurasi dari environment variables (.env)
+Fix: MAX_CONCURRENT_JOBS dibaca dari env, bukan hardcode
 """
 
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env dari root backend
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 # ── Tools ──────────────────────────────────────────────────────────────────────
@@ -40,6 +40,7 @@ for d in [UPLOAD_DIR, RESULTS_DIR, JOBS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 # ── Pipeline ───────────────────────────────────────────────────────────────────
-DEFAULT_TRIMMER_OPTS  = "SLIDINGWINDOW:4:20 MINLEN:25 LEADING:3 TRAILING:3"
-DEFAULT_THREADS       = int(os.getenv("DEFAULT_THREADS", "4"))
-MAX_CONCURRENT_JOBS   = int(os.getenv("MAX_CONCURRENT_JOBS", "5"))
+DEFAULT_TRIMMER_OPTS = "ILLUMINACLIP:TruSeq3-PE.fa:2:30:10 SLIDINGWINDOW:4:20 MINLEN:25 LEADING:3 TRAILING:3"
+DEFAULT_THREADS      = int(os.getenv("DEFAULT_THREADS", "4"))
+# Fix: baca dari env, bukan hardcode di pipeline_runner
+MAX_CONCURRENT_JOBS  = int(os.getenv("MAX_CONCURRENT_JOBS", "5"))

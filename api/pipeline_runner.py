@@ -49,7 +49,12 @@ async def run_pipeline(
     analysis_mode: AnalysisMode = AnalysisMode.WGS,
     end_type:      EndType      = EndType.SE,
     reference:     ReferenceGenome = ReferenceGenome.GRCh38,
-    sample_sex:    str = None,   # Fix #19: "male", "female", atau None
+    sample_sex:    str = None,
+    # Trimming parameters — user-configurable
+    trim_quality:  int  = 20,    # SLIDINGWINDOW quality (Q10-Q40)
+    trim_min_len:  int  = 36,    # MINLEN (20-100)
+    trim_adapter:  bool = True,  # pakai ILLUMINACLIP
+    trim_poly_g:   bool = False, # tambah poly-G (NovaSeq)
 ):
     _queue.append(job_id)
     job_manager.update_job_status(job_id, StageStatus.PENDING)
@@ -59,15 +64,26 @@ async def run_pipeline(
             _queue.remove(job_id)
 
         await _execute_pipeline(
-            job_id        = job_id,
-            fastq_path    = fastq_path,
-            fastq_r1      = fastq_r1,
-            fastq_r2      = fastq_r2,
-            bed_file      = bed_file,
-            analysis_mode = analysis_mode,
-            end_type      = end_type,
-            reference     = reference,
-            sample_sex    = sample_sex,
+            job_id          = job_id,
+            fastq_path      = fastq_path,
+            fastq_r1        = fastq_r1,
+            fastq_r2        = fastq_r2,
+            bed_file        = bed_file,
+            analysis_mode   = analysis_mode,
+            end_type        = end_type,
+            reference       = reference,
+            sample_sex      = sample_sex,
+            trim_quality    = trim_quality,
+            trim_min_len    = trim_min_len,
+            trim_adapter    = trim_adapter,
+            trim_poly_g     = trim_poly_g,
+            mark_duplicates = mark_duplicates,
+            min_qual        = min_qual,
+            min_dp          = min_dp,
+            min_gq          = min_gq,
+            max_depth       = max_depth,
+            min_bq          = min_bq,
+            min_mq          = min_mq,
         )
 
 
@@ -81,19 +97,29 @@ async def _execute_pipeline(
     end_type:      EndType      = EndType.SE,
     reference:     ReferenceGenome = ReferenceGenome.GRCh38,
     sample_sex:    str = None,
+    trim_quality:  int  = 20,
+    trim_min_len:  int  = 36,
+    trim_adapter:  bool = True,
+    trim_poly_g:   bool = False,
+    mark_duplicates: bool = True,
+    # Variant calling parameters
+    min_qual:   int = 20,    # Minimum QUAL score
+    min_dp:     int = 10,    # Minimum depth (DP)
+    min_gq:     int = 20,    # Minimum Genotype Quality (GQ)
+    max_depth:  int = 500,   # Max depth per posisi (500=WGS, 2000=WES panel)
+    min_bq:     int = 20,    # Minimum base quality di mpileup
+    min_mq:     int = 20,    # Minimum mapping quality di mpileup
 ):
     job_manager.update_job_status(job_id, StageStatus.RUNNING)
     ref_genome = REF_GENOMES.get(reference.value, REF_GENOMES["GRCh38"])
     outdir     = os.path.join(RESULTS_DIR, job_id)
     ploidy     = "GRCh37" if reference == ReferenceGenome.GRCh37 else "GRCh38"
-
-    # Fix #21: work dir per job — hindari bentrok antar job paralel
-    work_dir = os.path.join(outdir, ".work")
+    work_dir   = os.path.join(outdir, ".work")
 
     cmd = [
         NEXTFLOW_BIN, "run", NEXTFLOW_SCRIPT,
         "-profile",       NEXTFLOW_PROFILE,
-        "-w",             work_dir,           # Fix #21
+        "-w",             work_dir,
         "--ref_genome",   ref_genome,
         "--outdir",       outdir,
         "--ploidy",       ploidy,
@@ -102,10 +128,22 @@ async def _execute_pipeline(
         "--samtools_bin", SAMTOOLS_BIN,
         "--bcftools_bin", BCFTOOLS_BIN,
         "--fastqc_path",  FASTQC_PATH,
+        # Trimming params dari user
+        "--trim_sliding_window_quality", str(trim_quality),
+        "--trim_min_len",                str(trim_min_len),
+        "--trim_adapter",                str(trim_adapter).lower(),
+        "--trim_poly_g",                 str(trim_poly_g).lower(),
+        "--mark_duplicates",             str(mark_duplicates).lower(),
+        # Variant calling params dari user
+        "--min_qual",    str(min_qual),
+        "--min_dp",      str(min_dp),
+        "--min_gq",      str(min_gq),
+        "--max_depth",   str(max_depth),
+        "--min_bq",      str(min_bq),
+        "--min_mq",      str(min_mq),
         "-resume",
     ]
 
-    # Fix #19: teruskan jenis kelamin ke pipeline untuk ploidy chrX/chrY
     if sample_sex:
         cmd += ["--sample_sex", sample_sex]
 
@@ -142,6 +180,8 @@ async def _execute_pipeline(
         await process.wait()
 
         if process.returncode == 0:
+            # Parse coverage JSON file untuk update extended stats
+            _load_coverage_json(job_id, outdir)
             job_manager.update_job_status(job_id, StageStatus.COMPLETED)
         else:
             job_manager.update_job_status(job_id, StageStatus.FAILED)
@@ -152,6 +192,21 @@ async def _execute_pipeline(
         if job_id in job_manager._jobs:
             job_manager._jobs[job_id]["nextflow_log"] = f"Exception: {str(e)}"
             job_manager._save_job(job_id)
+
+
+def _load_coverage_json(job_id: str, outdir: str):
+    """Baca coverage JSON file setelah pipeline selesai dan update job."""
+    import json, glob
+    pattern = os.path.join(outdir, "**", "*.coverage.json")
+    files = glob.glob(pattern, recursive=True)
+    if not files:
+        return
+    try:
+        with open(files[0]) as f:
+            cov_data = json.load(f)
+        job_manager.update_coverage(job_id, cov_data)
+    except Exception:
+        pass
 
 
 def _parse_nextflow_output(job_id: str, line: str):
@@ -221,10 +276,13 @@ def _parse_nextflow_output(job_id: str, line: str):
     if "✅ VCF Output" in line:
         job_manager.update_stage(job_id, "variant_calling", StageStatus.COMPLETED, 100)
 
+    # Deteksi coverage dari output — sekarang format JSON
     if "📊 COVERAGE:" in line:
         try:
-            cov_str  = line.split("📊 COVERAGE:")[1].replace("x", "").strip()
-            coverage = float(cov_str)
-            job_manager.update_coverage(job_id, coverage)
+            cov_str = line.split("📊 COVERAGE:")[1].replace("x", "").split("|")[0].strip()
+            mean_cov = float(cov_str)
+            # Simpan sebagai object minimal kalau JSON file belum di-parse
+            # Job manager akan diupdate lagi saat JSON file dibaca
+            job_manager.update_coverage(job_id, {"mean_depth": mean_cov})
         except (ValueError, IndexError):
             pass

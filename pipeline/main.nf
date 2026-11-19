@@ -49,10 +49,21 @@ process TRIMMOMATIC_SE {
     tuple val(sample_id), path("${sample_id}.trimmed.fastq"), val("SE")
 
     script:
+    // Bangun trimmer_opts secara dinamis dari parameter user
+    def adapter_clip = params.trim_adapter
+        ? "ILLUMINACLIP:${params.adapter_file}:2:30:10:8:true"
+        : ""
+    def poly_g_clip  = params.trim_poly_g
+        ? "ILLUMINACLIP:${params.adapter_file.replace('.fa', '-polyG.fa')}:2:30:10:8:true"
+        : ""
+    def sliding      = "SLIDINGWINDOW:4:${params.trim_sliding_window_quality}"
+    def minlen       = "MINLEN:${params.trim_min_len}"
+    def trim_cmd     = [adapter_clip, poly_g_clip, "LEADING:5", "TRAILING:5", sliding, minlen]
+                           .findAll { it }.join(" ")
     """
     ${params.bin_dir}/trimmomatic SE -threads ${params.threads} \
         "${reads}" "${sample_id}.trimmed.fastq" \
-        ${params.trimmer_opts} 2> trimmomatic.log
+        ${trim_cmd} 2> trimmomatic.log
 
     # Gagalkan bila output kosong — jangan fallback ke raw FASTQ
     if [ ! -s "${sample_id}.trimmed.fastq" ]; then
@@ -79,12 +90,23 @@ process TRIMMOMATIC_PE {
           val("PE")
 
     script:
+    // Bangun trimmer_opts secara dinamis — sama dengan SE
+    def adapter_clip = params.trim_adapter
+        ? "ILLUMINACLIP:${params.adapter_file}:2:30:10:8:true"
+        : ""
+    def poly_g_clip  = params.trim_poly_g
+        ? "ILLUMINACLIP:${params.adapter_file.replace('.fa', '-polyG.fa')}:2:30:10:8:true"
+        : ""
+    def sliding      = "SLIDINGWINDOW:4:${params.trim_sliding_window_quality}"
+    def minlen       = "MINLEN:${params.trim_min_len}"
+    def trim_cmd     = [adapter_clip, poly_g_clip, "LEADING:5", "TRAILING:5", sliding, minlen]
+                           .findAll { it }.join(" ")
     """
     ${params.bin_dir}/trimmomatic PE -threads ${params.threads} \
         "${reads_r1}" "${reads_r2}" \
         "${sample_id}_R1.trimmed.fastq" "${sample_id}_R1.unpaired.fastq" \
         "${sample_id}_R2.trimmed.fastq" "${sample_id}_R2.unpaired.fastq" \
-        ${params.trimmer_opts} 2> trimmomatic.log
+        ${trim_cmd} 2> trimmomatic.log
 
     # Gagalkan bila output kosong
     if [ ! -s "${sample_id}_R1.trimmed.fastq" ]; then
@@ -108,10 +130,12 @@ process BWA_ALIGN_SE {
     tuple val(sample_id), path("${sample_id}.aligned.sorted.bam"), path("${sample_id}.aligned.sorted.bam.bai")
 
     script:
+    // Read Group: ID format SM.L001 — konsisten dengan konvensi Illumina
+    // LB = sample_id agar markdup bisa bedakan antar library bila nanti multi-lane
     """
     ${params.bin_dir}/bwa mem \
         -t ${params.threads} \
-        -R "@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA\\tLB:lib1\\tPU:unit1" \
+        -R "@RG\\tID:${sample_id}.L001\\tSM:${sample_id}\\tPL:ILLUMINA\\tLB:${sample_id}\\tPU:${sample_id}.L001" \
         "${ref_genome}" "${trimmed_reads}" \
         | ${params.samtools_bin} sort -@ ${params.threads} -m 4G \
           -o "${sample_id}.aligned.sorted.bam"
@@ -134,10 +158,12 @@ process BWA_ALIGN_PE {
     tuple val(sample_id), path("${sample_id}.aligned.sorted.bam"), path("${sample_id}.aligned.sorted.bam.bai")
 
     script:
+    // Read Group: ID format SM.L001 — konsisten dengan konvensi Illumina
+    // LB = sample_id agar markdup bisa bedakan antar library bila nanti multi-lane
     """
     ${params.bin_dir}/bwa mem \
         -t ${params.threads} \
-        -R "@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA\\tLB:lib1\\tPU:unit1" \
+        -R "@RG\\tID:${sample_id}.L001\\tSM:${sample_id}\\tPL:ILLUMINA\\tLB:${sample_id}\\tPU:${sample_id}.L001" \
         "${ref_genome}" "${r1}" "${r2}" \
         | ${params.samtools_bin} fixmate -m -@ ${params.threads} - - \
         | ${params.samtools_bin} sort -@ ${params.threads} -m 4G \
@@ -160,14 +186,25 @@ process MARKDUPLICATES {
     path "${sample_id}.markdup.metrics.txt"
 
     script:
-    """
-    ${params.samtools_bin} markdup \
-        -f "${sample_id}.markdup.metrics.txt" \
-        "${bam}" \
-        "${sample_id}.markdup.bam"
+    if (params.mark_duplicates) {
+        // Tandai duplicate — reads tetap ada tapi di-flag
+        """
+        ${params.samtools_bin} markdup \
+            -f "${sample_id}.markdup.metrics.txt" \
+            "${bam}" \
+            "${sample_id}.markdup.bam"
 
-    ${params.samtools_bin} index "${sample_id}.markdup.bam"
-    """
+        ${params.samtools_bin} index "${sample_id}.markdup.bam"
+        """
+    } else {
+        // Skip markdup — symlink BAM agar output konsisten
+        // Cocok untuk PCR-free library atau amplicon sequencing
+        """
+        cp "${bam}" "${sample_id}.markdup.bam"
+        cp "${bai}" "${sample_id}.markdup.bam.bai"
+        echo "mark_duplicates=false — skipped" > "${sample_id}.markdup.metrics.txt"
+        """
+    }
 }
 
 // ── Proses 5: Hitung Coverage ─────────────────────────────────────────────────
@@ -179,16 +216,112 @@ process COVERAGE_STATS {
     tuple val(sample_id), path(bam), path(bai)
 
     output:
-    tuple val(sample_id), path("${sample_id}.coverage.txt")
+    tuple val(sample_id), path("${sample_id}.coverage.json")
 
     script:
     // Untuk WES/Targeted: hitung coverage di region BED saja
     // Untuk WGS: hitung coverage seluruh referensi
     def region_opt = params.target_bed ? "-l ${params.target_bed}" : ""
     """
-    ${params.samtools_bin} coverage ${region_opt} "${bam}" \
-        | awk 'NR>1 && \$3>0 {sum+=\$7*\$3; len+=\$3} END{printf "%.2f\\n", (len>0 ? sum/len : 0)}' \
-        > "${sample_id}.coverage.txt"
+    # samtools coverage output kolom:
+    # #rname startpos endpos numreads covbases coverage meandepth meanbaseq meanmapq
+    # Kita pakai: covbases($5), coverage($6=pct_bases_1x), meandepth($7)
+
+    samtools coverage ${region_opt} "${bam}" > coverage_raw.txt
+
+    # Hitung metrik lengkap dengan python (sudah tersedia di conda env)
+    python3 << 'PYEOF'
+import json, subprocess, sys
+
+# Baca output samtools coverage
+rows = []
+with open("coverage_raw.txt") as f:
+    for line in f:
+        if line.startswith("#"):
+            continue
+        parts = line.strip().split("\\t")
+        if len(parts) < 7:
+            continue
+        try:
+            chrom      = parts[0]
+            start      = int(parts[1])
+            end        = int(parts[2])
+            numreads   = int(parts[3])
+            covbases   = int(parts[4])
+            cov_pct    = float(parts[5])   # % bases >=1x
+            meandepth  = float(parts[6])
+            length     = end - start if end > start else 1
+            rows.append({
+                "chrom": chrom,
+                "length": length,
+                "covbases": covbases,
+                "meandepth": meandepth,
+                "cov_pct": cov_pct,
+            })
+        except (ValueError, IndexError):
+            continue
+
+if not rows:
+    result = {
+        "mean_depth": 0.0, "median_depth": 0.0,
+        "pct_bases_10x": 0.0, "pct_bases_20x": 0.0, "pct_bases_30x": 0.0,
+        "total_bases": 0, "covered_bases": 0,
+        "warning": "No coverage data"
+    }
+else:
+    # Weighted mean depth
+    total_len    = sum(r["length"] for r in rows)
+    total_cov    = sum(r["covbases"] for r in rows)
+    weighted_sum = sum(r["meandepth"] * r["length"] for r in rows)
+    mean_depth   = weighted_sum / total_len if total_len > 0 else 0.0
+
+    # Median depth — gunakan meandepth per contig sebagai approximasi
+    depths = sorted(r["meandepth"] for r in rows)
+    n = len(depths)
+    median_depth = (depths[n//2] + depths[(n-1)//2]) / 2 if n > 0 else 0.0
+
+    # pct_bases_Nx: estimasi dari mean depth (approximasi bila tidak ada depth per-base)
+    # Formula: P(depth >= N) ~ 1 - e^(-mean/N) untuk distribusi Poisson
+    import math
+    def pct_at_least_nx(mean, n):
+        if mean <= 0:
+            return 0.0
+        # Poisson CDF approximation
+        prob = 1.0
+        term = math.exp(-mean)
+        s = term
+        for k in range(1, n):
+            term *= mean / k
+            s += term
+        prob = max(0.0, (1.0 - s) * 100.0)
+        return round(prob, 1)
+
+    # Warning bila coverage rendah
+    warning = None
+    if mean_depth < 10:
+        warning = "Coverage sangat rendah (<10x) — hasil variant calling tidak reliable"
+    elif mean_depth < 20:
+        warning = "Coverage rendah (<20x) — beberapa variant mungkin terlewat"
+
+    result = {
+        "mean_depth":     round(mean_depth, 2),
+        "median_depth":   round(median_depth, 2),
+        "pct_bases_10x":  pct_at_least_nx(mean_depth, 10),
+        "pct_bases_20x":  pct_at_least_nx(mean_depth, 20),
+        "pct_bases_30x":  pct_at_least_nx(mean_depth, 30),
+        "total_bases":    total_len,
+        "covered_bases":  total_cov,
+        "warning":        warning,
+    }
+
+with open("${sample_id}.coverage.json", "w") as f:
+    json.dump(result, f, indent=2)
+
+print("📊 COVERAGE: " + str(result["mean_depth"]) + "x")
+print("   pct_bases_20x: " + str(result["pct_bases_20x"]) + "%")
+if result.get("warning"):
+    print("⚠️  " + result["warning"])
+PYEOF
     """
 }
 
@@ -233,9 +366,11 @@ process CALL_VARIANTS {
 
     script:
     // Fix WES/Targeted: gunakan -r {chrom} bersama BED agar tidak duplikat varian
-    // BED di-filter per kromosom via -r sehingga setiap task hanya proses 1 kromosom
     def region_flag = params.target_bed ? "-r ${chrom} -T ${params.target_bed}" : "-r ${chrom}"
-    def max_depth   = params.max_depth ?: 0  // 0 = unlimited
+    // Fix bug: max_depth=0 di bcftools bukan unlimited, gunakan 8000 sebagai unlimited
+    def max_depth   = (params.max_depth as int) > 0 ? params.max_depth : 8000
+    def min_bq      = params.min_bq ?: 20
+    def min_mq      = params.min_mq ?: 20
     """
     ${params.bcftools_bin} mpileup \
         -O b \
@@ -243,6 +378,8 @@ process CALL_VARIANTS {
         -f "${ref_genome}" \
         ${region_flag} \
         --max-depth ${max_depth} \
+        --min-BQ ${min_bq} \
+        --min-MQ ${min_mq} \
         -a FORMAT/AD,FORMAT/DP \
         "${bam}"
 
@@ -263,8 +400,9 @@ process GATHER_VCF {
     tuple val(sample_id), path("${sample_id}.filtered.vcf.gz"), path("${sample_id}.filtered.vcf.gz.tbi")
 
     script:
-    def min_qual    = params.min_qual ?: 20
-    def min_dp      = params.min_dp   ?: 5
+    def min_qual = params.min_qual ?: 20
+    def min_dp   = params.min_dp   ?: 10
+    def min_gq   = params.min_gq   ?: 20
     // Fix #19: gunakan samples.txt untuk ploidy chrX/chrY berdasarkan jenis kelamin
     def ploidy_flag = params.sample_sex
         ? "--ploidy-file samples.txt"
@@ -320,9 +458,10 @@ process GATHER_VCF {
     ${params.bcftools_bin} index -t "${sample_id}.norm.vcf.gz"
 
     # Filter berdasarkan params (tidak hardcode)
+    # Filter expression sesuai UI: QUAL>=min_qual && FORMAT/DP>=min_dp && FORMAT/GQ>=min_gq
     ${params.bcftools_bin} filter \
         -s LOWQUAL \
-        -e "QUAL<${min_qual} || FORMAT/DP<${min_dp}" \
+        -e "QUAL<${min_qual} || FORMAT/DP<${min_dp} || FORMAT/GQ<${min_gq}" \
         -O z \
         -o "${sample_id}.filtered.vcf.gz" \
         "${sample_id}.norm.vcf.gz"
@@ -366,7 +505,8 @@ workflow {
     // Hitung coverage (per region bila WES/Targeted)
     coverage_out = COVERAGE_STATS(bam_out)
     coverage_out.map { sid, cov_file ->
-        "📊 COVERAGE: ${cov_file.text.trim()}x"
+        def cov = new groovy.json.JsonSlurper().parse(cov_file)
+        "📊 COVERAGE: ${cov.mean_depth}x | pct_bases_20x: ${cov.pct_bases_20x}%${cov.warning ? ' | ⚠️ ' + cov.warning : ''}"
     }.view()
 
     // Scatter-gather BCFTools per kromosom

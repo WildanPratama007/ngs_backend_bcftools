@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import aiofiles
 
 from .models import (
-    AnalysisMode, EndType, ReferenceGenome, VariantType,
+    AnalysisMode, EndType, ReferenceGenome, VariantType, TrimPreset,
     SubmitResponse, PipelineStatus, StageStatus
 )
 from .config import UPLOAD_DIR, RESULTS_DIR
@@ -169,7 +169,23 @@ async def submit_pipeline(
     end_type:      EndType         = Form(EndType.SE),
     reference:     ReferenceGenome = Form(ReferenceGenome.GRCh38),
     variant_type:  VariantType     = Form(VariantType.GERMLINE),
-    sample_sex:    Optional[str]   = Form(None),   # Fix #19: "male" atau "female"
+    sample_sex:    Optional[str]   = Form(None),
+    # ── Trimming parameters — user-configurable ──────────────────────────────
+    # Preset shortcut: "research" = Q20/36bp, "clinical" = Q30/36bp
+    trim_preset:   Optional[TrimPreset] = Form(None),
+    trim_quality:  Optional[int]  = Form(None),   # Q10-Q40, default 20
+    trim_min_len:  Optional[int]  = Form(None),   # 20-100bp, default 36
+    trim_adapter:  Optional[bool] = Form(None),   # default True
+    trim_poly_g:   Optional[bool] = Form(None),   # default False (NovaSeq only)
+    # ── Alignment parameters ─────────────────────────────────────────────────
+    mark_duplicates: Optional[bool] = Form(None),
+    # ── Variant calling parameters ───────────────────────────────────────────
+    min_qual:   Optional[int]  = Form(None),   # default 20
+    min_dp:     Optional[int]  = Form(None),   # default 10
+    min_gq:     Optional[int]  = Form(None),   # default 20
+    max_depth:  Optional[int]  = Form(None),   # default 500 (WGS), 2000 (WES panel)
+    min_bq:     Optional[int]  = Form(None),   # default 20 (minimum base quality)
+    min_mq:     Optional[int]  = Form(None),   # default 20 (minimum mapping quality)
     fastq:         Optional[UploadFile] = File(None),
     fastq_r1:      Optional[UploadFile] = File(None),
     fastq_r2:      Optional[UploadFile] = File(None),
@@ -209,6 +225,56 @@ async def submit_pipeline(
         _error_response("VALIDATION_FAILED", "sample_sex harus 'male' atau 'female'.", 400)
     sex = sample_sex.lower() if sample_sex else None
 
+    # ── Resolve trimming parameters ──────────────────────────────────────────
+    # Preset menimpa nilai individual bila keduanya diberikan
+    if trim_preset == TrimPreset.CLINICAL:
+        final_trim_quality = 30
+        final_trim_min_len = 36
+        final_trim_adapter = True
+        final_trim_poly_g  = False
+    elif trim_preset == TrimPreset.RESEARCH:
+        final_trim_quality = 20
+        final_trim_min_len = 36
+        final_trim_adapter = True
+        final_trim_poly_g  = False
+    else:
+        # Pakai nilai individual, fallback ke default clinical bila tidak diisi
+        final_trim_quality = trim_quality if trim_quality is not None else 20
+        final_trim_min_len = trim_min_len if trim_min_len is not None else 36
+        final_trim_adapter = trim_adapter if trim_adapter is not None else True
+        final_trim_poly_g  = trim_poly_g  if trim_poly_g  is not None else False
+
+    # Validasi range
+    if not (10 <= final_trim_quality <= 40):
+        _error_response("VALIDATION_FAILED", "trim_quality harus antara 10-40.", 400)
+    if not (20 <= final_trim_min_len <= 100):
+        _error_response("VALIDATION_FAILED", "trim_min_len harus antara 20-100.", 400)
+
+    # Resolve mark_duplicates — default True
+    final_mark_duplicates = mark_duplicates if mark_duplicates is not None else True
+
+    # Resolve variant calling params — default clinical grade
+    final_min_qual  = min_qual  if min_qual  is not None else 20
+    final_min_dp    = min_dp    if min_dp    is not None else 10
+    final_min_gq    = min_gq    if min_gq    is not None else 20
+    final_max_depth = max_depth if max_depth is not None else 500
+    final_min_bq    = min_bq    if min_bq    is not None else 20
+    final_min_mq    = min_mq    if min_mq    is not None else 20
+
+    # Validasi range variant calling params
+    if not (0 <= final_min_qual <= 999):
+        _error_response("VALIDATION_FAILED", "min_qual harus antara 0-999.", 400)
+    if not (1 <= final_min_dp <= 500):
+        _error_response("VALIDATION_FAILED", "min_dp harus antara 1-500.", 400)
+    if not (0 <= final_min_gq <= 99):
+        _error_response("VALIDATION_FAILED", "min_gq harus antara 0-99.", 400)
+    if not (100 <= final_max_depth <= 10000):
+        _error_response("VALIDATION_FAILED", "max_depth harus antara 100-10000.", 400)
+    if not (0 <= final_min_bq <= 40):
+        _error_response("VALIDATION_FAILED", "min_bq harus antara 0-40.", 400)
+    if not (0 <= final_min_mq <= 60):
+        _error_response("VALIDATION_FAILED", "min_mq harus antara 0-60.", 400)
+
     # Ekstrak dan sanitasi sample name
     source_filename = fastq_r1.filename if end_type == EndType.PE else fastq.filename
     sample_name = _extract_sample_name(source_filename or "sample", end_type)
@@ -237,7 +303,18 @@ async def submit_pipeline(
             analysis_mode = analysis_mode,
             end_type      = end_type,
             reference     = reference,
-            sample_sex    = sex,            # Fix #19
+            sample_sex    = sex,
+            trim_quality  = final_trim_quality,
+            trim_min_len    = final_trim_min_len,
+            trim_adapter    = final_trim_adapter,
+            trim_poly_g     = final_trim_poly_g,
+            mark_duplicates = final_mark_duplicates,
+            min_qual        = final_min_qual,
+            min_dp          = final_min_dp,
+            min_gq          = final_min_gq,
+            max_depth       = final_max_depth,
+            min_bq          = final_min_bq,
+            min_mq          = final_min_mq,
         )
     )
 

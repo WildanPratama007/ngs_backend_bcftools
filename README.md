@@ -1,9 +1,9 @@
 # 🧬 NGS Secondary Analysis — Backend BCFTools
 
 Backend E2E pipeline NGS berbasis **BCFTools** dengan REST API.  
-Pipeline: `FastQC → Trimmomatic → BWA MEM → BCFTools mpileup → bcftools call → bcftools filter`
+Pipeline: `FastQC → Trimmomatic → BWA MEM → MarkDuplicates → BCFTools mpileup/call/norm/filter`
 
-Port default: **8001**
+Port default: **8001** | Versi: **1.2.0**
 
 ---
 
@@ -11,24 +11,24 @@ Port default: **8001**
 
 ```
 ngs_backend_bcftools/
-├── api/                    ← FastAPI REST API
-│   ├── main.py             ← Endpoints
-│   ├── models.py           ← Pydantic models
-│   ├── job_manager.py      ← Job state management
-│   ├── pipeline_runner.py  ← Async Nextflow runner (semaphore 5 job)
+├── api/
+│   ├── main.py             ← Endpoints + validasi parameter
+│   ├── models.py           ← Pydantic models + TrimPreset + CoverageStats
+│   ├── job_manager.py      ← Job state + recovery saat restart
+│   ├── pipeline_runner.py  ← Async Nextflow runner
 │   └── config.py           ← Path & konfigurasi dari .env
 │
-├── pipeline/               ← Nextflow pipeline (BCFTools)
-│   ├── main.nf             ← Pipeline DSL2
-│   └── nextflow.config     ← Konfigurasi & resource allocation
+├── pipeline/
+│   ├── main.nf             ← Pipeline DSL2 (8 proses)
+│   └── nextflow.config     ← Default parameter pipeline
 │
 ├── scripts/
-│   └── setup.sh            ← Setup environment & dependencies
+│   └── setup.sh
 │
-├── data/                   ← Auto-dibuat, tidak masuk git
-│   ├── uploads/            ← FASTQ input dari user
-│   ├── results/            ← Output pipeline (BAM, VCF)
-│   └── jobs/               ← Job state JSON
+├── data/
+│   ├── uploads/
+│   ├── results/
+│   └── jobs/
 │
 ├── requirements.txt
 ├── .env.example
@@ -51,63 +51,37 @@ conda activate ngs_platform
 uvicorn api.main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
-Dokumentasi API: **http://localhost:8001/docs**
+Dokumentasi API interaktif: **http://localhost:8001/docs**
 
 ---
 
 ## 📥 Persiapan Referensi Genom
 
-BCFTools **tidak membutuhkan** file `.dict` (berbeda dengan GATK). Cukup `.fa`, `.fai`, dan BWA index.
+BCFTools **tidak membutuhkan** file `.dict`. Cukup `.fa`, `.fai`, dan BWA index.
 
-### Download Referensi
-
-**GRCh38 chr22 (untuk testing — cepat):**
+**GRCh38 chr22 (testing):**
 ```bash
-# Download chr22 ~51MB
 curl -L -o ref_genome/chr22.fa.gz \
   https://hgdownload.soe.ucsc.edu/goldenPath/hg38/chromosomes/chr22.fa.gz
 gunzip ref_genome/chr22.fa.gz
-
-# Build BWA index (~3 menit)
 bwa index ref_genome/chr22.fa
 samtools faidx ref_genome/chr22.fa
-# Tidak perlu .dict untuk BCFTools
 ```
 
-**GRCh38 Full hg38 (untuk production):**
+**GRCh38 Full hg38 (production):**
 ```bash
-# Download hg38 ~938MB compressed
 curl -L -C - -o ref_genome/hg38.fa.gz \
   https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz
 gunzip ref_genome/hg38.fa.gz
-
-# Build index (~2 jam)
 bwa index ref_genome/hg38.fa
 samtools faidx ref_genome/hg38.fa
 ```
 
-**GRCh37 Full hg19 (untuk data lama):**
-```bash
-curl -L -C - -o ref_genome/hg19.fa.gz \
-  https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz
-gunzip ref_genome/hg19.fa.gz
-bwa index ref_genome/hg19.fa
-samtools faidx ref_genome/hg19.fa
-```
-
-### File Index yang Dibutuhkan per Referensi
-
-| File | Dibuat oleh | Dibutuhkan untuk |
+| Referensi | URL | Keterangan |
 |---|---|---|
-| `*.fa` | Download | Semua tools |
-| `*.fa.fai` | `samtools faidx` | BCFTools mpileup, BWA |
-| `*.fa.amb` | `bwa index` | BWA MEM |
-| `*.fa.ann` | `bwa index` | BWA MEM |
-| `*.fa.bwt` | `bwa index` | BWA MEM |
-| `*.fa.pac` | `bwa index` | BWA MEM |
-| `*.fa.sa` | `bwa index` | BWA MEM |
-
-> ✅ Tidak perlu `.dict` — BCFTools tidak membutuhkannya (berbeda dengan GATK)
+| GRCh38 chr22 | [UCSC chr22](https://hgdownload.soe.ucsc.edu/goldenPath/hg38/chromosomes/chr22.fa.gz) | Default testing |
+| GRCh38 Full | [UCSC hg38](https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz) | Production |
+| GRCh37 Full | [UCSC hg19](https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz) | Data lama |
 
 ---
 
@@ -115,130 +89,247 @@ samtools faidx ref_genome/hg19.fa
 
 ```
 Input: FASTQ (SE atau PE)
-```
-
-### Tahap 1 — FastQC (Quality Control)
-```
-Input:  sample.fastq (SE) atau sample_R1/R2.fastq (PE)
-Output: results/{job_id}/{sample}/fastqc/
-        ├── {sample}_fastqc.html  ← Laporan QC visual
-        └── {sample}_fastqc.zip   ← Data QC untuk MultiQC
-```
-
-### Tahap 2 — Trimmomatic (Adapter Trimming)
-```
-Input:  sample.fastq
-Output: results/{job_id}/{sample}/trimmed/
-        ├── {sample}.trimmed.fastq         ← SE: reads bersih
-        ├── {sample}_R1.trimmed.fastq      ← PE: R1 paired
-        ├── {sample}_R1.unpaired.fastq     ← PE: R1 yang pasangannya dibuang
-        ├── {sample}_R2.trimmed.fastq      ← PE: R2 paired
-        └── {sample}_R2.unpaired.fastq     ← PE: R2 yang pasangannya dibuang
-```
-
-### Tahap 3 — BWA MEM + Samtools (Alignment)
-```
-Input:  {sample}.trimmed.fastq + ref_genome.fa
-Output: results/{job_id}/{sample}/bwa/
-        ├── {sample}.aligned.sorted.bam     ← BAM sorted
-        ├── {sample}.aligned.sorted.bam.bai ← Index BAM
-        └── {sample}.coverage.txt           ← Mean coverage (📊 COVERAGE: XX.Xx)
-```
-
-### Tahap 4 — BCFTools mpileup (Scatter per Kromosom)
-```
-Input:  {sample}.aligned.sorted.bam + ref_genome.fa
-Output: work/ (internal Nextflow, scatter per kromosom)
-        └── {sample}.{chrom}.bcf      ← Pileup per kromosom
-        └── {sample}.{chrom}.bcf.csi  ← Index BCF
-```
-
-### Tahap 5 — BCFTools concat + call + filter (Gather)
-```
-Input:  semua {sample}.{chrom}.bcf
-Output: results/{job_id}/{sample}/vcf/
-        └── {sample}.filtered.vcf  ← VCF final yang sudah difilter
-```
-
-Pipeline dalam proses GATHER_VCF:
-```
-bcftools concat → bcftools call -m -v → bcftools filter -e 'QUAL<20 || DP<5'
-```
-
-### Output Utama untuk Tertiary Analysis
-```
-✅ {sample}.filtered.vcf  ← File yang perlu dikirim ke tertiary analysis
+  │
+  ▼ Step 1: FastQC — Quality Control
+  │   → {sample}/fastqc/{sample}_fastqc.html
+  │   → {sample}/fastqc/{sample}_fastqc.zip
+  │
+  ▼ Step 2: Trimmomatic — Adapter & Quality Trimming
+  │   Parameter: trim_quality, trim_min_len, trim_adapter, trim_poly_g
+  │   → {sample}/trimmed/{sample}_R1.trimmed.fastq  (PE)
+  │   → {sample}/trimmed/{sample}_R2.trimmed.fastq  (PE)
+  │   → {sample}/trimmed/{sample}.trimmed.fastq     (SE)
+  │
+  ▼ Step 3: BWA MEM — Alignment ke Referensi
+  │   Read Group: ID={sample}.L001, SM={sample}, PL=ILLUMINA, LB={sample}
+  │   → {sample}/bwa/{sample}.aligned.sorted.bam
+  │
+  ▼ Step 4: samtools markdup — Mark PCR Duplicates
+  │   Parameter: mark_duplicates (on/off)
+  │   → {sample}/bwa/{sample}.markdup.bam
+  │   → {sample}/bwa/{sample}.markdup.metrics.txt
+  │
+  ▼ Step 5: Coverage Stats — Metrik Coverage
+  │   → {sample}/bwa/{sample}.coverage.json
+  │   (mean_depth, median_depth, pct_bases_10/20/30x, warning)
+  │
+  ▼ Step 6: Deteksi Kromosom dari BAM header
+  │   (otomatis, hanya kromosom utama chr1-chr22, chrX, chrY, chrM)
+  │
+  ▼ Step 7: BCFTools mpileup (scatter per kromosom)
+  │   Parameter: max_depth, min_bq, min_mq
+  │   → work/.work/{sample}.{chrom}.bcf  (internal)
+  │
+  ▼ Step 8: BCFTools concat → call → norm → filter (gather)
+      Parameter: min_qual, min_dp, min_gq, sample_sex
+      Filter: QUAL>=min_qual && FORMAT/DP>=min_dp && FORMAT/GQ>=min_gq
+      → {sample}/vcf/{sample}.filtered.vcf.gz  ✅ OUTPUT UTAMA
+      → {sample}/vcf/{sample}.filtered.vcf.gz.tbi
 ```
 
 ---
 
-## 🔧 Tools, Framework & Library
-
-### Pipeline Tools
+## 🔧 Tools
 
 | Tool | Versi | Fungsi | Instalasi |
 |---|---|---|---|
-| **Nextflow** | 24.10.6 | Workflow manager | conda bioconda |
-| **FastQC** | 0.11.x | Quality control reads | Lokal binary |
-| **Trimmomatic** | 0.39 | Adapter & quality trimming | conda bioconda |
-| **BWA MEM** | 0.7.19 | Short read alignment ke GRCh38/GRCh37 | conda bioconda |
-| **Samtools** | 1.13 | BAM sort, index, coverage stats | apt (`/usr/bin/samtools`) |
-| **BCFTools mpileup** | 1.13 | Pileup per kromosom dari BAM | apt (`/usr/bin/bcftools`) |
-| **BCFTools call** | 1.13 | Variant calling dari pileup (`-m -v`) | apt (`/usr/bin/bcftools`) |
-| **BCFTools filter** | 1.13 | Filter berdasarkan QUAL dan DP | apt (`/usr/bin/bcftools`) |
-| **BCFTools concat** | 1.13 | Gabung BCF per kromosom (scatter-gather) | apt (`/usr/bin/bcftools`) |
+| **Nextflow** | 24.10.6 | Workflow manager | conda |
+| **FastQC** | 0.11.x | Quality control reads | local binary |
+| **Trimmomatic** | 0.39 | Adapter & quality trimming | conda |
+| **BWA MEM** | 0.7.19 | Short read alignment | conda |
+| **Samtools** | 1.13 | Sort, index, markdup, coverage | apt `/usr/bin/` |
+| **BCFTools** | 1.13 | mpileup, call, norm, filter, concat | apt `/usr/bin/` |
 
-> ⚠️ Samtools dan BCFTools menggunakan versi dari **apt** (`/usr/bin/`) karena versi conda mengalami konflik `libcrypto.so.1.0.0` di Ubuntu versi baru.
+---
 
-### API Framework & Library
+## ⚙️ Parameter Lengkap — User-Configurable
 
-| Library | Versi | Fungsi |
+Semua parameter di bawah bisa diatur saat submit job via API atau Swagger UI (`/docs`).
+
+---
+
+### Step 2 — Trimming
+
+| Parameter API | Type | Default | Range | Deskripsi |
+|---|---|---|---|---|
+| `trim_preset` | enum | — | `research`, `clinical` | Shortcut: research=Q20/36bp, clinical=Q30/36bp |
+| `trim_quality` | int | 20 | 10–40 | Phred quality threshold SLIDINGWINDOW |
+| `trim_min_len` | int | 36 | 20–100 | Minimum read length setelah trimming (bp) |
+| `trim_adapter` | bool | true | true/false | Aktifkan ILLUMINACLIP adapter removal |
+| `trim_poly_g` | bool | false | true/false | Tambah poly-G ke adapter list (NovaSeq/NextSeq) |
+
+**Panduan memilih `trim_quality`:**
+
+| Kondisi | Nilai | Alasan |
 |---|---|---|
-| **FastAPI** | 0.111.0 | REST API framework |
-| **Uvicorn** | 0.29.0 | ASGI server |
-| **Pydantic** | 2.7.1 | Data validation & models |
-| **python-multipart** | 0.0.9 | File upload handling |
-| **aiofiles** | 23.2.1 | Async file I/O |
-| **python-dotenv** | 1.0.1 | Environment variable loading |
+| Coverage rendah (<15x) | 15 | Pertahankan sebanyak mungkin reads |
+| WGS standard (30x) | 20 | Balance (default) |
+| WES panel | 25 | Kualitas lebih penting dari jumlah reads |
+| Clinical grade | 30 | False positive minimal |
 
-### Parameter Pipeline — Nilai Default
+**Adapter file yang tersedia:**
+```
+TruSeq3-PE-2.fa    ← Default (Illumina TruSeq PE, HiSeq/NovaSeq)
+TruSeq3-PE.fa      ← TruSeq PE versi lama
+TruSeq2-PE.fa      ← Data lama (HiSeq 2000)
+NexteraPE-PE.fa    ← Nextera XT kit
+TruSeq3-SE.fa      ← Single-End
+```
+Ganti adapter di `nextflow.config`:
+```groovy
+adapter_file = "/path/to/NexteraPE-PE.fa"
+```
 
-| Parameter | Nilai Default | Alasan |
-|---|---|---|
-| `trimmer_opts` | `SLIDINGWINDOW:4:20 MINLEN:25 LEADING:3 TRAILING:3` | Balance kualitas dan jumlah reads tersisa |
-| `threads` | `4` | Aman untuk 6-core lokal, scalable ke 16 di AWS |
-| `samtools sort -m` | `4G` per thread | Aman untuk RAM 16GB+ |
-| `ploidy` | `GRCh38` | Standard human diploid (bcftools call --ploidy) |
-| `min_qual` | `20` | Filter QUAL<20 (probabilitas error <1%) |
-| `min_dp` | `5` | Filter DP<5 (minimum read depth per posisi) |
-| `-m` (bcftools call) | multiallelic model | Lebih akurat dari consensus model untuk human |
-| `-v` (bcftools call) | variant sites only | Hanya output posisi yang ada variant |
+---
 
-### Referensi Genom yang Didukung
+### Step 4 — Alignment & MarkDuplicates
 
-| Referensi | URL Download | Index | Keterangan |
+| Parameter API | Type | Default | Deskripsi |
 |---|---|---|---|
-| GRCh38 chr22 | [UCSC hg38 chr22](https://hgdownload.soe.ucsc.edu/goldenPath/hg38/chromosomes/chr22.fa.gz) | ✅ `.fai` + BWA | Default testing |
-| GRCh38 Full | [UCSC hg38](https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz) | ✅ | Production |
-| GRCh37 Full | [UCSC hg19](https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz) | ✅ | Data lama |
+| `mark_duplicates` | bool | true | Tandai PCR duplicate. `false` untuk PCR-free library atau amplicon sequencing |
+| `sample_sex` | string | null | `male` atau `female` — untuk ploidy chrX/chrY yang benar |
+
+**Kapan `mark_duplicates=false`:**
+
+| Library type | Nilai | Alasan |
+|---|---|---|
+| Standard PCR (TruSeq) | `true` | Ada PCR duplicate dari library prep |
+| PCR-free library | `false` | Tidak ada amplifikasi → tidak ada duplicate |
+| Amplicon sequencing | `false` | Semua reads memang dari amplicon yang sama |
+
+**Kenapa `sample_sex` penting:**
+- Laki-laki: chrX/chrY hemizigot (1 copy) → ploidy 1
+- Perempuan: chrX diploid (2 copy), chrY tidak ada → ploidy 2/0
+- Tanpa ini, variant chrX laki-laki dilaporkan sebagai heterozygous padahal seharusnya hemizigot → penting untuk diagnosis X-linked disease (hemofilia, buta warna, dll)
+
+---
+
+### Step 7 — BCFTools mpileup
+
+| Parameter API | Type | Default | Range | Deskripsi |
+|---|---|---|---|---|
+| `max_depth` | int | 500 | 100–10000 | Max read depth per posisi. 500=WGS, 2000=WES panel dalam |
+| `min_bq` | int | 20 | 0–40 | Minimum base quality untuk dihitung di pileup |
+| `min_mq` | int | 20 | 0–60 | Minimum mapping quality read |
+
+**Panduan `max_depth`:**
+
+| Use case | Nilai | Alasan |
+|---|---|---|
+| WGS standard (30x) | 500 | Coverage tidak akan melebihi ini |
+| WES panel (200x) | 1000 | Cukup untuk panel standar |
+| Deep panel (1000x) | 2000 | Sesuai UI SenusaBio default |
+
+**Panduan `min_bq` dan `min_mq`:**
+
+| Mode | min_bq | min_mq | Dampak |
+|---|---|---|---|
+| Permissive | 13 | 0 | Semua reads dihitung, false positive lebih tinggi |
+| Standard | 20 | 20 | Balance (default) |
+| Strict | 25 | 30 | False positive minimal, coverage turun sedikit |
+
+---
+
+### Step 8 — Variant Calling & Filter
+
+| Parameter API | Type | Default | Range | Deskripsi |
+|---|---|---|---|---|
+| `min_qual` | int | 20 | 0–999 | Minimum QUAL score variant |
+| `min_dp` | int | 10 | 1–500 | Minimum read depth (FORMAT/DP) |
+| `min_gq` | int | 20 | 0–99 | Minimum Genotype Quality (FORMAT/GQ) |
+
+**Filter expression yang dibangun otomatis:**
+```
+QUAL<{min_qual} || FORMAT/DP<{min_dp} || FORMAT/GQ<{min_gq}
+```
+Contoh dengan default: `QUAL<20 || FORMAT/DP<10 || FORMAT/GQ<20`
+
+**Panduan filter per use case:**
+
+| Use case | min_qual | min_dp | min_gq |
+|---|---|---|---|
+| Screening populasi | 10 | 3 | 10 |
+| WGS research | 20 | 10 | 20 |
+| WES clinical | 30 | 10 | 20 |
+| Deep panel | 20 | 20 | 30 |
+
+> Variant yang tidak lolos filter **tidak dihapus** — hanya diberi tag `LOWQUAL`. Downstream tools tetap bisa akses semua variant.
+
+---
+
+## 📊 Coverage Report (Output Baru)
+
+Coverage tidak lagi hanya angka mean. Response API sekarang berisi object lengkap:
+
+```json
+{
+  "coverage": {
+    "mean_depth":     22.4,
+    "median_depth":   21.0,
+    "pct_bases_10x":  96.2,
+    "pct_bases_20x":  85.3,
+    "pct_bases_30x":  61.7,
+    "total_bases":    51000000,
+    "covered_bases":  48900000,
+    "warning":        null
+  }
+}
+```
+
+**Warning otomatis:**
+- `< 10x`: "Coverage sangat rendah — hasil variant calling tidak reliable"
+- `< 20x`: "Coverage rendah — beberapa variant mungkin terlewat"
 
 ---
 
 ## 🌐 API Endpoints
 
+### Submit Pipeline
+
+```
+POST /api/pipeline/submit
+```
+
+**Contoh submit lengkap:**
+```bash
+curl -X POST http://localhost:8001/api/pipeline/submit \
+  -F "analysis_mode=WES" \
+  -F "end_type=PE" \
+  -F "reference=GRCh38" \
+  -F "sample_sex=male" \
+  # Trimming
+  -F "trim_preset=clinical" \
+  # Alignment
+  -F "mark_duplicates=true" \
+  # Variant calling
+  -F "min_qual=20" \
+  -F "min_dp=10" \
+  -F "min_gq=20" \
+  -F "max_depth=2000" \
+  -F "min_bq=20" \
+  -F "min_mq=20" \
+  # Files
+  -F "fastq_r1=@sample_R1.fastq.gz" \
+  -F "fastq_r2=@sample_R2.fastq.gz" \
+  -F "bed_file=@targets.bed"
+```
+
+> File harus berekstensi `.fastq.gz` atau `.fq.gz`
+
+### Endpoints Lain
+
 | Method | Endpoint | Deskripsi |
 |---|---|---|
-| `POST` | `/api/pipeline/submit` | Submit pipeline (SE/PE, WGS/WES/Targeted) |
-| `GET` | `/api/pipeline/{id}/status` | Cek status semua tahap |
+| `GET` | `/api/pipeline/{id}/status` | Status + coverage report |
 | `GET` | `/api/pipeline/jobs` | List semua job |
-| `GET` | `/api/pipeline/queue` | Status antrian (max 5 job paralel) |
+| `GET` | `/api/pipeline/queue` | Status antrian |
 | `GET` | `/api/pipeline/{id}/fastqc/download` | Download FastQC HTML |
 | `GET` | `/api/pipeline/{id}/trimming/download` | Download Trimmed FASTQ |
-| `GET` | `/api/pipeline/{id}/alignment/download` | Download BAM |
-| `GET` | `/api/pipeline/{id}/variant-calling/download` | Download VCF |
-| `GET` | `/api/references` | List referensi genom tersedia |
+| `GET` | `/api/pipeline/{id}/alignment/download` | Download BAM (post-markdup) |
+| `GET` | `/api/pipeline/{id}/variant-calling/download` | Download VCF (.vcf.gz) |
+| `GET` | `/api/references` | List referensi tersedia |
 | `GET` | `/api/health` | Health check |
-| `DELETE` | `/api/pipeline/{id}` | Hapus job |
+| `DELETE` | `/api/pipeline/{id}` | Hapus job + file |
 
 ---
 
@@ -246,64 +337,68 @@ bcftools concat → bcftools call -m -v → bcftools filter -e 'QUAL<20 || DP<5'
 
 | Fitur | Status | Keterangan |
 |---|---|---|
-| Single-End (SE) | ✅ Didukung | Berjalan end-to-end |
-| Paired-End (PE) | ✅ Didukung | PE dengan samtools fixmate |
-| WGS | ✅ Didukung | Scatter-gather per kromosom |
-| WES (dengan BED) | ✅ Ada di kode | `-R bed_file` di mpileup |
-| Targeted (dengan BED) | ✅ Ada di kode | `-R bed_file` di mpileup |
-| GRCh38 | ✅ | hg38.fa + index tersedia |
-| GRCh37 | ✅ | hg19.fa + index tersedia |
-| Multi-job paralel | ✅ | Semaphore 5 job bersamaan |
-| Scatter-gather BCFTools | ✅ | mpileup per kromosom, concat + call + filter |
-| Coverage stats otomatis | ✅ | `📊 COVERAGE: XX.Xx` di log |
+| Single-End (SE) | ✅ | End-to-end |
+| Paired-End (PE) | ✅ | Dengan samtools fixmate |
+| WGS | ✅ | Scatter-gather per kromosom |
+| WES (BED) | ✅ | `-r chrom -T bed` per task, no duplikat |
+| Targeted (BED) | ✅ | Sama dengan WES |
+| GRCh38 | ✅ | hg38.fa tersedia |
+| GRCh37 | ✅ | hg19.fa tersedia |
+| Trimming user-configurable | ✅ | Preset + 4 parameter individual |
+| MarkDuplicates toggle | ✅ | On/off via `mark_duplicates` |
+| Read Group per lane | ✅ | Format `{sample}.L001` |
+| Extended coverage stats | ✅ | mean, median, pct_bases_10/20/30x, warning |
+| Ploidy chrX/chrY per sex | ✅ | Via `sample_sex` |
+| Variant calling user-configurable | ✅ | 6 parameter: min_qual/dp/gq, max_depth, min_bq/mq |
+| bcftools norm | ✅ | Left-align + split multiallelic |
+| Output .vcf.gz + .tbi | ✅ | Siap untuk annotation |
+| Work dir per job | ✅ | Tidak bentrok antar job paralel |
+| Streaming upload | ✅ | Chunk 1MB, tidak OOM |
+| Recovery saat restart | ✅ | Job running → failed |
+| Validasi ekstensi file | ✅ | `.fastq.gz`/`.fq.gz` only |
+| Docker profile | ✅ | bcftools v1.13 |
+| Somatic calling | ❌ | Belum didukung |
+| Multi-lane | ❌ | Planned |
+| Autentikasi | ❌ | Planned (AWS Cognito) |
 
 ---
 
-## 🖥️ Analisis Komputasi
+## ⚠️ Keterbatasan — Multi-lane
 
-### Estimasi Waktu Pipeline
+Pipeline ini hanya menerima **satu pasang FASTQ per job**.
+
+Mesin Illumina sering menghasilkan beberapa file per sampel (multi-lane):
+```
+sample_L001_R1.fastq.gz + sample_L001_R2.fastq.gz  ← Lane 1
+sample_L002_R1.fastq.gz + sample_L002_R2.fastq.gz  ← Lane 2
+```
+
+**Jika sampel kamu multi-lane, gabungkan dulu di lab sebelum submit:**
+```bash
+cat sample_L001_R1.fastq.gz sample_L002_R1.fastq.gz > sample_R1.fastq.gz
+cat sample_L001_R2.fastq.gz sample_L002_R2.fastq.gz > sample_R2.fastq.gz
+```
+
+> Dukungan multi-lane direncanakan di versi berikutnya.
+
+---
+
+## 🖥️ Estimasi Waktu Pipeline
 
 | Konfigurasi | WES 100MB | WES 15GB (30x) | WGS 174GB |
 |---|---|---|---|
-| **Lokal saat ini** (`/mnt/c/`, 4 thread) | ~8-10 menit | ~2-3 jam | ~10-15 jam |
-| Lokal optimal (`/home/`, 6 thread) | ~4-6 menit | ~1-1.5 jam | ~5-8 jam |
-| AWS c7i.4xlarge EBS gp3 (16 thread) | **~1-2 menit** | **~15-25 menit** | **~1.5-2 jam** |
-
-> BCFTools umumnya **2-3x lebih cepat** dari GATK untuk data coverage rendah-sedang karena tidak ada MarkDuplicates, HaplotypeCaller yang berat, atau GVCF intermediate.
-
-### BCFTools vs GATK — Perbandingan Singkat
-
-| Aspek | BCFTools | GATK HaplotypeCaller |
-|---|---|---|
-| Kecepatan | ✅ Lebih cepat (~2-3x) | ❌ Lebih lambat |
-| Akurasi SNP | ✅ Baik untuk coverage >20x | ✅ Lebih akurat untuk coverage rendah |
-| Akurasi INDEL | ⚠️ Kurang akurat untuk INDEL panjang | ✅ Lebih akurat |
-| Kebutuhan resource | ✅ RAM lebih hemat | ❌ RAM lebih besar |
-| File `.dict` | ✅ Tidak perlu | ❌ Wajib |
-| BQSR | ✅ Tidak perlu | ⚠️ Disarankan untuk klinis |
-| Cocok untuk | WGS coverage >20x, screening | Clinical grade, INDEL analysis |
-
-### Storage I/O
-
-| Kondisi | Throughput | Dampak |
-|---|---|---|
-| `/mnt/c/` (NTFS via WSL) | ~100-200 MB/s | BCFTools baca/tulis lambat |
-| Linux native `/home/` | ~400-500 MB/s | ~2x lebih cepat |
-| AWS EBS gp3 | ~1,000 MB/s | ~5x lebih cepat |
-
-```bash
-# Pindah data/ ke Linux FS untuk performa lebih baik
-# Edit .env:
-UPLOAD_DIR=/home/mahasiswa/ngs_data/uploads
-RESULTS_DIR=/home/mahasiswa/ngs_data/results
-```
+| Lokal `/mnt/c/` 4 thread | ~10-15 menit | ~2-3 jam | ~12-15 jam |
+| Lokal `/home/` 6 thread | ~5-8 menit | ~1-1.5 jam | ~6-8 jam |
+| AWS c7i.4xlarge EBS gp3 | **~1-2 menit** | **~15-25 menit** | **~1.5-2 jam** |
 
 ---
 
 ## 📌 Catatan Teknis
 
-- `samtools` dan `bcftools` pakai `/usr/bin/` (apt) — bukan conda, untuk menghindari konflik `libcrypto.so.1.0.0`
-- Pipeline di-test pada Nextflow 24.10.6, BCFTools 1.13, WSL2 Ubuntu
-- BCFTools tidak memerlukan MarkDuplicates sebagai prerequisite — langsung mpileup dari BAM sorted
-- Filter default `QUAL<20 || DP<5` sudah cukup untuk screening; untuk klinis pertimbangkan `QUAL<30 || DP<10`
-- Coverage dihitung via `samtools depth` → mean depth seluruh genome/region
+- `samtools` dan `bcftools` pakai `/usr/bin/` (apt) — bukan conda
+- Pipeline di-test pada Nextflow 24.10.6, BCFTools 1.13, WSL2 Ubuntu 22.04
+- Output VCF berformat `.vcf.gz` + `.tbi` (bgzipped + tabix indexed)
+- Variant ditandai `LOWQUAL` (tidak dihapus) bila tidak lolos filter
+- Work dir per job: `data/results/{job_id}/.work/` — aman untuk paralel
+- `sample_sex` penting untuk diagnosis X-linked disease
+- `max_depth=0` di bcftools bukan unlimited — pipeline menggunakan 8000 sebagai unlimited

@@ -32,6 +32,12 @@ class VariantType(str, Enum):
     SOMATIC  = "somatic"
 
 
+class TrimPreset(str, Enum):
+    """Preset kualitas trimming — ditampilkan di UI"""
+    RESEARCH = "research"   # SLIDINGWINDOW Q20, MINLEN 36
+    CLINICAL = "clinical"   # SLIDINGWINDOW Q30, MINLEN 36
+
+
 # JobStatus sesuai API Contract section 2.3
 class JobStatus(str, Enum):
     QUEUED            = "QUEUED"
@@ -63,6 +69,18 @@ class StageInfo(BaseModel):
     model_config = {"json_encoders": {datetime: lambda v: v.isoformat() + "Z" if v else None}}
 
 
+class CoverageStats(BaseModel):
+    """Extended coverage statistics — lebih informatif dari mean saja."""
+    mean_depth:     float = 0.0
+    median_depth:   float = 0.0
+    pct_bases_10x:  float = 0.0   # % bases dengan depth ≥10x
+    pct_bases_20x:  float = 0.0   # % bases dengan depth ≥20x
+    pct_bases_30x:  float = 0.0   # % bases dengan depth ≥30x
+    total_bases:    int   = 0
+    covered_bases:  int   = 0
+    warning:        Optional[str] = None
+
+
 class PipelineStatus(BaseModel):
     job_id:        str
     sample_name:   str
@@ -71,7 +89,7 @@ class PipelineStatus(BaseModel):
     end_type:      EndType
     reference:     ReferenceGenome
     variant_type:  VariantType
-    coverage:      Optional[float] = None
+    coverage:      Optional[CoverageStats] = None   # extended coverage stats
     stages: dict = Field(default_factory=lambda: {
         "fastqc":          StageInfo().model_dump(),
         "trimming":        StageInfo().model_dump(),

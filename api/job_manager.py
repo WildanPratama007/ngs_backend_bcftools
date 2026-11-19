@@ -139,10 +139,11 @@ def update_elapsed(job_id: str):
     _save_job(job_id)
 
 
-def update_coverage(job_id: str, coverage: float):
+def update_coverage(job_id: str, coverage: dict):
+    """Update extended coverage stats setelah alignment selesai."""
     if job_id not in _jobs:
         return
-    _jobs[job_id]["coverage"] = round(coverage, 2)
+    _jobs[job_id]["coverage"] = coverage
     _save_job(job_id)
 
 

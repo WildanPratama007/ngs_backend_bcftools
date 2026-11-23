@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NGS Pipeline Wizard — Test UI</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fa; color: #333; }
+
+    .header { background: #1a1a2e; color: white; padding: 16px 32px; display: flex; align-items: center; gap: 12px; }
+    .header h1 { font-size: 18px; font-weight: 600; }
+    .header .badge { background: #16213e; border: 1px solid #0f3460; padding: 4px 10px; border-radius: 20px; font-size: 12px; color: #e94560; }
+
+    .container { max-width: 900px; margin: 32px auto; padding: 0 16px; }
+
+    /* Progress bar */
+    .progress-bar { display: flex; align-items: center; margin-bottom: 32px; background: white; border-radius: 12px; padding: 20px 32px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .step-item { display: flex; flex-direction: column; align-items: center; flex: 1; position: relative; }
+    .step-item:not(:last-child)::after { content: ''; position: absolute; top: 16px; left: 60%; width: 80%; height: 2px; background: #e0e0e0; z-index: 0; }
+    .step-item.completed:not(:last-child)::after { background: #4caf50; }
+    .step-circle { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; z-index: 1; border: 2px solid #e0e0e0; background: white; color: #999; }
+    .step-item.active .step-circle { border-color: #2196f3; background: #2196f3; color: white; }
+    .step-item.completed .step-circle { border-color: #4caf50; background: #4caf50; color: white; }
+    .step-item.failed .step-circle { border-color: #f44336; background: #f44336; color: white; }
+    .step-label { font-size: 11px; margin-top: 6px; color: #999; text-align: center; }
+    .step-item.active .step-label { color: #2196f3; font-weight: 600; }
+    .step-item.completed .step-label { color: #4caf50; }
+
+    /* Cards */
+    .card { background: white; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .card h2 { font-size: 16px; font-weight: 600; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+    .card .subtitle { font-size: 13px; color: #666; margin-bottom: 20px; }
+    .card.disabled { opacity: 0.5; pointer-events: none; }
+    .card.active { border-left: 4px solid #2196f3; }
+    .card.completed { border-left: 4px solid #4caf50; }
+    .card.failed { border-left: 4px solid #f44336; }
+
+    /* Form */
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    .form-group.full { grid-column: 1 / -1; }
+    label { font-size: 13px; font-weight: 500; color: #444; }
+    .label-hint { font-size: 11px; color: #888; font-weight: 400; }
+    input[type=file], select, input[type=number], input[type=range] { 
+      width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; outline: none;
+    }
+    input:focus, select:focus { border-color: #2196f3; }
+    input[type=range] { padding: 4px 0; }
+    .range-row { display: flex; align-items: center; gap: 12px; }
+    .range-value { font-weight: 700; color: #2196f3; min-width: 40px; text-align: right; }
+    .toggle-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    .toggle { position: relative; display: inline-block; width: 40px; height: 22px; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #ccc; border-radius: 22px; transition: .3s; }
+    .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: .3s; }
+    input:checked + .slider { background: #2196f3; }
+    input:checked + .slider:before { transform: translateX(18px); }
+
+    /* Preset buttons */
+    .preset-row { display: flex; gap: 8px; margin-bottom: 12px; }
+    .preset-btn { padding: 6px 16px; border: 1px solid #ddd; border-radius: 20px; font-size: 12px; cursor: pointer; background: white; color: #555; transition: all .2s; }
+    .preset-btn:hover { border-color: #2196f3; color: #2196f3; }
+    .preset-btn.active { background: #2196f3; color: white; border-color: #2196f3; }
+
+    /* Buttons */
+    .btn-row { display: flex; gap: 12px; margin-top: 20px; }
+    .btn { padding: 10px 24px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all .2s; display: flex; align-items: center; gap: 8px; }
+    .btn-primary { background: #2196f3; color: white; }
+    .btn-primary:hover { background: #1976d2; }
+    .btn-primary:disabled { background: #b0bec5; cursor: not-allowed; }
+    .btn-secondary { background: #f5f5f5; color: #555; }
+    .btn-secondary:hover { background: #e0e0e0; }
+
+    /* Status */
+    .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+    .status-not_started { background: #f5f5f5; color: #999; }
+    .status-running { background: #e3f2fd; color: #1976d2; }
+    .status-completed { background: #e8f5e9; color: #2e7d32; }
+    .status-failed { background: #ffebee; color: #c62828; }
+    .status-pending { background: #fff3e0; color: #e65100; }
+    .status-cancelled { background: #eceff1; color: #546e7a; }
+
+    /* Result */
+    .result-box { background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; font-family: monospace; font-size: 12px; white-space: pre-wrap; max-height: 200px; overflow-y: auto; margin-top: 12px; }
+    .result-box.success { border-color: #4caf50; background: #f1f8e9; }
+    .result-box.error { border-color: #f44336; background: #fff5f5; }
+
+    /* Coverage */
+    .coverage-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 12px; }
+    .coverage-item { text-align: center; background: #f8f9fa; border-radius: 8px; padding: 12px; }
+    .coverage-value { font-size: 22px; font-weight: 700; color: #2196f3; }
+    .coverage-label { font-size: 11px; color: #888; margin-top: 2px; }
+    .coverage-warning { background: #fff3e0; border: 1px solid #ffb74d; border-radius: 8px; padding: 10px; margin-top: 8px; font-size: 13px; color: #e65100; }
+
+    /* Spinner */
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.4); border-top-color: white; border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Analysis ID */
+    .id-box { background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 8px; padding: 12px 16px; font-size: 13px; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+    .id-box code { font-family: monospace; font-weight: 700; color: #2e7d32; }
+
+    /* Log */
+    .log-box { background: #1a1a2e; color: #a8d8ea; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 11px; max-height: 160px; overflow-y: auto; margin-top: 8px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div>🧬</div>
+  <h1>NGS Pipeline Wizard</h1>
+  <span class="badge">BCFTools Backend</span>
+  <span style="margin-left:auto; font-size:12px; color:#888;">
+    API: <span id="api-url">http://localhost:8001</span>
+  </span>
+</div>
+
+<div class="container">
+
+  <!-- Analysis ID -->
+  <div class="id-box" id="id-box" style="display:none">
+    <span>🔑 Analysis ID:</span>
+    <code id="display-analysis-id"></code>
+    <button class="btn btn-secondary" style="padding:4px 10px;font-size:11px;margin-left:auto" onclick="copyId()">Copy</button>
+  </div>
+
+  <!-- Progress Bar -->
+  <div class="progress-bar">
+    <div class="step-item active" id="prog-1">
+      <div class="step-circle">1</div>
+      <div class="step-label">Upload & QC</div>
+    </div>
+    <div class="step-item" id="prog-2">
+      <div class="step-circle">2</div>
+      <div class="step-label">Trimming</div>
+    </div>
+    <div class="step-item" id="prog-3">
+      <div class="step-circle">3</div>
+      <div class="step-label">Alignment</div>
+    </div>
+    <div class="step-item" id="prog-4">
+      <div class="step-circle">4</div>
+      <div class="step-label">Variant Calling</div>
+    </div>
+    <div class="step-item" id="prog-5">
+      <div class="step-circle">5</div>
+      <div class="step-label">Results</div>
+    </div>
+  </div>
+
+  <!-- STEP 1: Upload & QC -->
+  <div class="card active" id="card-1">
+    <h2>① Upload & QC
+      <span class="status-badge status-not_started" id="status-1">Not started</span>
+    </h2>
+    <p class="subtitle">Upload file FASTQ dan jalankan FastQC untuk quality check.</p>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Analysis ID <span class="label-hint">(opsional, auto-generate jika kosong)</span></label>
+        <input type="text" id="analysis-id" placeholder="e.g. ana_001" />
+      </div>
+      <div class="form-group">
+        <label>End Type</label>
+        <select id="end-type" onchange="togglePEInputs()">
+          <option value="PE">Paired-End (PE)</option>
+          <option value="SE">Single-End (SE)</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Reference Genome</label>
+        <select id="reference">
+          <option value="GRCh38_chr22">GRCh38 chr22 (testing)</option>
+          <option value="GRCh38">GRCh38 Full</option>
+          <option value="GRCh37">GRCh37</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Analysis Mode</label>
+        <select id="analysis-mode" onchange="toggleBedInput()">
+          <option value="WGS">WGS (Whole Genome Sequencing)</option>
+          <option value="WES">WES (Whole Exome Sequencing)</option>
+          <option value="Targeted">Targeted Panel</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Sequencing Platform <span class="label-hint">(mempengaruhi adapter dan trimming)</span></label>
+        <select id="seq-platform" onchange="onPlatformChange()">
+          <option value="illumina_hiseq">Illumina HiSeq / HiSeq X</option>
+          <option value="illumina_novaseq">Illumina NovaSeq (aktifkan poly-G filter)</option>
+          <option value="illumina_nextseq">Illumina NextSeq (aktifkan poly-G filter)</option>
+          <option value="illumina_miseq">Illumina MiSeq (read panjang 250-300bp)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Library Preparation <span class="label-hint">(mempengaruhi adapter dan markdup)</span></label>
+        <select id="library-prep" onchange="onLibraryChange()">
+          <option value="truseq_pe">TruSeq PE (standard PCR)</option>
+          <option value="truseq_se">TruSeq SE (single-end)</option>
+          <option value="truseq_pcr_free">TruSeq PCR-free (nonaktifkan markdup)</option>
+          <option value="nextera">Nextera / Nextera XT</option>
+          <option value="nextera_dna_flex">Nextera DNA Flex (Illumina DNA Prep)</option>
+        </select>
+      </div>
+    </div>
+    <div id="platform-hint" style="font-size:12px;color:#888;margin-top:-8px;margin-bottom:12px;padding:8px 12px;background:#f8f9fa;border-radius:6px;display:none"></div>
+    <div class="form-group full" id="bed-input" style="display:none">
+      <label>BED File <span class="label-hint">(target region untuk WES/Targeted)</span></label>
+      <input type="file" id="bed-file" accept=".bed" />
+    </div>
+    <div class="form-row" id="pe-inputs">
+      <div class="form-group">
+        <label>FASTQ R1 (.fastq.gz)</label>
+        <input type="file" id="fastq-r1" accept=".fastq.gz,.fq.gz,.fastq" />
+      </div>
+      <div class="form-group">
+        <label>FASTQ R2 (.fastq.gz)</label>
+        <input type="file" id="fastq-r2" accept=".fastq.gz,.fq.gz,.fastq" />
+      </div>
+    </div>
+    <div class="form-group full" id="se-input" style="display:none">
+      <label>FASTQ (.fastq.gz)</label>
+      <input type="file" id="fastq-se" accept=".fastq.gz,.fq.gz,.fastq" />
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-qc" onclick="runQC()">
+        ▶ Run Upload & QC
+      </button>
+    </div>
+    <div class="log-box" id="log-1" style="display:none"></div>
+  </div>
+
+  <!-- STEP 2: Trimming -->
+  <div class="card disabled" id="card-2">
+    <h2>② Trimming
+      <span class="status-badge status-not_started" id="status-2">Not started</span>
+    </h2>
+    <p class="subtitle">Buang adapter dan reads berkualitas rendah.</p>
+
+    <div style="margin-bottom:12px">
+      <div style="font-size:13px;font-weight:500;margin-bottom:8px">Preset</div>
+      <div class="preset-row">
+        <button class="preset-btn" onclick="setTrimPreset('research')">Research (Q20)</button>
+        <button class="preset-btn active" onclick="setTrimPreset('clinical')">Clinical (Q30)</button>
+        <button class="preset-btn" onclick="setTrimPreset('custom')">Custom</button>
+      </div>
+    </div>
+
+    <div id="trim-custom-params">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Sliding Window Quality <span class="label-hint">(Q10-Q40)</span></label>
+          <div class="range-row">
+            <input type="range" id="trim-quality" min="10" max="40" value="30" oninput="updateVal('trim-quality-val', this.value)" />
+            <span class="range-value" id="trim-quality-val">30</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Minimum Read Length <span class="label-hint">(20-100bp)</span></label>
+          <div class="range-row">
+            <input type="range" id="trim-min-len" min="20" max="100" value="36" oninput="updateVal('trim-min-len-val', this.value)" />
+            <span class="range-value" id="trim-min-len-val">36</span>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <div class="toggle-row">
+            <label class="toggle"><input type="checkbox" id="trim-adapter" checked /><span class="slider"></span></label>
+            <span>Clip adapters (ILLUMINACLIP)</span>
+          </div>
+        </div>
+        <div class="form-group">
+          <div class="toggle-row">
+            <label class="toggle"><input type="checkbox" id="trim-poly-g" /><span class="slider"></span></label>
+            <span>Add poly-G (NovaSeq/NextSeq)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-trim" onclick="runTrimming()">▶ Run Trimming</button>
+    </div>
+    <div class="log-box" id="log-2" style="display:none"></div>
+  </div>
+
+  <!-- STEP 3: Alignment -->
+  <div class="card disabled" id="card-3">
+    <h2>③ Alignment
+      <span class="status-badge status-not_started" id="status-3">Not started</span>
+    </h2>
+    <p class="subtitle">BWA MEM alignment, MarkDuplicates, dan hitung coverage.</p>
+
+    <div class="form-row">
+      <div class="form-group">
+        <div class="toggle-row">
+          <label class="toggle"><input type="checkbox" id="mark-dup" checked /><span class="slider"></span></label>
+          <span>Mark Duplicates <span class="label-hint">(nonaktifkan untuk PCR-free)</span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-align" onclick="runAlignment()">▶ Run Alignment</button>
+    </div>
+    <div id="coverage-result" style="display:none"></div>
+    <div class="log-box" id="log-3" style="display:none"></div>
+  </div>
+
+  <!-- STEP 4: Variant Calling -->
+  <div class="card disabled" id="card-4">
+    <h2>④ Variant Calling
+      <span class="status-badge status-not_started" id="status-4">Not started</span>
+    </h2>
+    <p class="subtitle">BCFTools mpileup → call → norm → filter.</p>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Minimum QUAL <span class="label-hint">(0-999)</span></label>
+        <div class="range-row">
+          <input type="range" id="min-qual" min="0" max="60" value="20" oninput="updateVal('min-qual-val', this.value)" />
+          <span class="range-value" id="min-qual-val">20</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Minimum Depth (DP) <span class="label-hint">(1-500)</span></label>
+        <div class="range-row">
+          <input type="range" id="min-dp" min="1" max="100" value="10" oninput="updateVal('min-dp-val', this.value + 'x')" />
+          <span class="range-value" id="min-dp-val">10x</span>
+        </div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Minimum Genotype Quality (GQ) <span class="label-hint">(0-99)</span></label>
+        <div class="range-row">
+          <input type="range" id="min-gq" min="0" max="40" value="20" oninput="updateVal('min-gq-val', this.value)" />
+          <span class="range-value" id="min-gq-val">20</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Maximum Read Depth <span class="label-hint">(per posisi)</span></label>
+        <div class="range-row">
+          <input type="range" id="max-depth" min="100" max="5000" step="100" value="500" oninput="updateVal('max-depth-val', this.value)" />
+          <span class="range-value" id="max-depth-val">500</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Sample Sex <span class="label-hint">(untuk ploidy chrX/chrY)</span></label>
+        <select id="sample-sex">
+          <option value="">Tidak diketahui (default diploid)</option>
+          <option value="male">Male</option>
+          <option value="female">Female</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="result-box" id="filter-expr" style="margin-top:0; padding:10px; font-size:12px;">
+      QUAL>=20 && FORMAT/DP>=10 && FORMAT/GQ>=20
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-vc" onclick="runVariantCalling()">▶ Run Variant Calling</button>
+    </div>
+    <div class="log-box" id="log-4" style="display:none"></div>
+  </div>
+
+  <!-- STEP 5: Results -->
+  <div class="card disabled" id="card-5">
+    <h2>⑤ Results
+      <span class="status-badge status-not_started" id="status-5">Not started</span>
+    </h2>
+    <p class="subtitle">Pipeline selesai. Download hasil VCF.</p>
+    <div id="result-content"></div>
+  </div>
+
+</div>
+
+<script>
+  const API = 'http://localhost:8001';
+  let analysisId = null;
+  const pollIntervals = {};   // satu interval per step, supaya Step 1 dan 2 bisa dipoll bersamaan
+  let trimPreset = 'clinical';
+
+  // ── Utils ──────────────────────────────────────────────────────────────────
+  function updateVal(id, val) {
+    document.getElementById(id).textContent = val;
+    updateFilterExpr();
+  }
+
+  function updateFilterExpr() {
+    const q  = document.getElementById('min-qual').value;
+    const dp = document.getElementById('min-dp').value;
+    const gq = document.getElementById('min-gq').value;
+    document.getElementById('filter-expr').textContent =
+      `QUAL>=${q} && FORMAT/DP>=${dp} && FORMAT/GQ>=${gq}`;
+  }
+
+  function toggleBedInput() {
+    const mode = document.getElementById('analysis-mode').value;
+    const bedInput = document.getElementById('bed-input');
+    bedInput.style.display = (mode === 'WES' || mode === 'Targeted') ? 'flex' : 'none';
+  }
+
+  // Platform → auto-set trim_poly_g dan MINLEN di Step 2
+  function onPlatformChange() {
+    const platform = document.getElementById('seq-platform').value;
+    const hint = document.getElementById('platform-hint');
+    hint.style.display = 'block';
+
+    // Reset poly-G kecuali sudah di-set oleh library
+    const lib = document.getElementById('library-prep').value;
+
+    if (platform === 'illumina_novaseq' || platform === 'illumina_nextseq') {
+      document.getElementById('trim-poly-g').checked = true;
+      // Set MINLEN ke 36 (standard)
+      document.getElementById('trim-min-len').value = 36;
+      document.getElementById('trim-min-len-val').textContent = 36;
+      hint.innerHTML = '💡 <b>NovaSeq/NextSeq</b>: Poly-G filter diaktifkan otomatis di Step 2 (Trimming). Ini menghilangkan poly-G artifact di ujung reads.';
+      hint.style.color = '#1976d2';
+    } else if (platform === 'illumina_miseq') {
+      document.getElementById('trim-poly-g').checked = false;
+      // MiSeq: MINLEN naik ke 50 karena read lebih panjang
+      document.getElementById('trim-min-len').value = 50;
+      document.getElementById('trim-min-len-val').textContent = 50;
+      hint.innerHTML = '💡 <b>MiSeq</b>: MINLEN otomatis dinaikkan ke <b>50bp</b> di Step 2 karena read lebih panjang (250-300bp). Nilai ini sudah ter-set di slider Trimming.';
+      hint.style.color = '#1976d2';
+    } else {
+      document.getElementById('trim-poly-g').checked = false;
+      document.getElementById('trim-min-len').value = 36;
+      document.getElementById('trim-min-len-val').textContent = 36;
+      hint.innerHTML = '💡 <b>HiSeq</b>: Pengaturan standar, tidak ada perubahan otomatis.';
+      hint.style.color = '#666';
+    }
+    // Re-trigger library change agar tidak konflik
+    updateLibraryHint();
+  }
+
+  // Library prep → auto-set adapter dan mark_duplicates
+  function onLibraryChange() {
+    updateLibraryHint();
+  }
+
+  function updateLibraryHint() {
+    const lib = document.getElementById('library-prep').value;
+    const hint = document.getElementById('platform-hint');
+    hint.style.display = 'block';
+
+    // Reset mark_duplicates ke default ON
+    document.getElementById('mark-dup').checked = true;
+
+    if (lib === 'truseq_pcr_free') {
+      document.getElementById('mark-dup').checked = false;
+      hint.innerHTML = '💡 <b>PCR-free library</b>: Mark Duplicates dinonaktifkan otomatis di Step 3 — tidak ada PCR duplicate yang perlu ditandai.';
+      hint.style.color = '#2e7d32';
+    } else if (lib === 'nextera' || lib === 'nextera_dna_flex') {
+      hint.innerHTML = '💡 <b>Nextera library</b>: Adapter Nextera akan dipakai otomatis di Step 2 (NexteraPE-PE.fa). Pastikan file tersedia di conda env.';
+      hint.style.color = '#e65100';
+    } else if (lib === 'truseq_se') {
+      hint.innerHTML = '💡 <b>TruSeq SE</b>: Single-End mode. Pastikan pilih <b>SE</b> di End Type.';
+      hint.style.color = '#1976d2';
+    } else {
+      hint.innerHTML = '💡 <b>TruSeq PE</b>: Pengaturan standar, tidak ada perubahan otomatis.';
+      hint.style.color = '#666';
+    }
+  }
+
+  function togglePEInputs() {
+    const isPE = document.getElementById('end-type').value === 'PE';
+    document.getElementById('pe-inputs').style.display = isPE ? 'grid' : 'none';
+    document.getElementById('se-input').style.display  = isPE ? 'none' : 'flex';
+  }
+
+  function setTrimPreset(preset) {
+    trimPreset = preset;
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    const isCustom = preset === 'custom';
+    if (preset === 'clinical') {
+      document.getElementById('trim-quality').value = 30;
+      document.getElementById('trim-quality-val').textContent = 30;
+      document.getElementById('trim-min-len').value = 36;
+      document.getElementById('trim-min-len-val').textContent = 36;
+    } else if (preset === 'research') {
+      document.getElementById('trim-quality').value = 20;
+      document.getElementById('trim-quality-val').textContent = 20;
+    }
+  }
+
+  function copyId() {
+    navigator.clipboard.writeText(analysisId);
+  }
+
+  function log(step, msg, isError) {
+    const box = document.getElementById(`log-${step}`);
+    box.style.display = 'block';
+    const color = isError ? '#ff7070' : '#a8d8ea';
+    box.innerHTML += `<span style="color:${color}">${new Date().toLocaleTimeString()} — ${msg}</span>\n`;
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function setStatus(step, status, text) {
+    const badge = document.getElementById(`status-${step}`);
+    badge.className = `status-badge status-${status}`;
+    const labels = { not_started:'Not started', pending:'Queued', running:'Running...', completed:'Completed ✓', failed:'Failed ✗', cancelled:'Cancelled' };
+    badge.textContent = labels[status] || text || status;
+
+    const card = document.getElementById(`card-${step}`);
+    card.className = 'card';
+    if (status === 'running') card.classList.add('active');
+    else if (status === 'completed') card.classList.add('completed');
+    else if (status === 'failed') card.classList.add('failed');
+    else if (status === 'not_started') card.classList.add('disabled');
+
+    const prog = document.getElementById(`prog-${step}`);
+    if (prog) {
+      prog.className = 'step-item';
+      if (status === 'completed') prog.classList.add('completed');
+      else if (status === 'running' || status === 'pending') prog.classList.add('active');
+      else if (status === 'failed') prog.classList.add('failed');
+    }
+  }
+
+  function enableCard(step) {
+    const card = document.getElementById(`card-${step}`);
+    card.classList.remove('disabled');
+    card.style.opacity = '1';
+    card.style.pointerEvents = 'auto';
+  }
+
+  // ── API calls ──────────────────────────────────────────────────────────────
+  async function runQC() {
+    const btn = document.getElementById('btn-qc');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Running...';
+
+    // Generate analysis ID
+    analysisId = document.getElementById('analysis-id').value.trim() ||
+      'ana_' + Date.now().toString(36);
+    document.getElementById('display-analysis-id').textContent = analysisId;
+    document.getElementById('id-box').style.display = 'flex';
+
+    const endType = document.getElementById('end-type').value;
+    const analysisMode = document.getElementById('analysis-mode').value;
+    const adapterKit = document.getElementById('library-prep').value;
+    const fd = new FormData();
+    fd.append('end_type', endType);
+    fd.append('reference', document.getElementById('reference').value);
+    fd.append('adapter_kit', adapterKit);
+
+    if (endType === 'PE') {
+      const r1 = document.getElementById('fastq-r1').files[0];
+      const r2 = document.getElementById('fastq-r2').files[0];
+      if (!r1 || !r2) { alert('Pilih file R1 dan R2'); btn.disabled=false; btn.innerHTML='▶ Run Upload & QC'; return; }
+      fd.append('fastq_r1', r1);
+      fd.append('fastq_r2', r2);
+    } else {
+      const f = document.getElementById('fastq-se').files[0];
+      if (!f) { alert('Pilih file FASTQ'); btn.disabled=false; btn.innerHTML='▶ Run Upload & QC'; return; }
+      fd.append('fastq', f);
+    }
+
+    // BED file untuk WES/Targeted
+    if (analysisMode === 'WES' || analysisMode === 'Targeted') {
+      const bedFile = document.getElementById('bed-file').files[0];
+      if (!bedFile) { alert('WES/Targeted membutuhkan BED file'); btn.disabled=false; btn.innerHTML='▶ Run Upload & QC'; return; }
+      fd.append('bed_file', bedFile);
+    }
+
+    setStatus(1, 'running');
+    log(1, `Submitting QC untuk analysis ${analysisId}...`);
+
+    try {
+      const res = await fetch(`${API}/api/analyses/${analysisId}/qc/run`, { method:'POST', body:fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(JSON.stringify(data));
+      log(1, `Upload selesai, FastQC berjalan: ${JSON.stringify(data)}`);
+      // Step 2 tidak butuh hasil FastQC, cukup FASTQ sudah ter-upload
+      enableCard(2);
+      log(1, '➡ Step 2 (Trimming) sudah bisa dijalankan tanpa menunggu FastQC selesai.');
+      pollStatus(1, 'fastqc');
+    } catch(e) {
+      log(1, `Error: ${e.message}`, true);
+      setStatus(1, 'failed');
+      btn.disabled = false;
+      btn.innerHTML = '▶ Run Upload & QC';
+    }
+  }
+
+  async function runTrimming() {
+    const btn = document.getElementById('btn-trim');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Running...';
+
+    const fd = new FormData();
+    fd.append('trim_quality', document.getElementById('trim-quality').value);
+    fd.append('trim_min_len', document.getElementById('trim-min-len').value);
+    fd.append('trim_adapter', document.getElementById('trim-adapter').checked);
+    fd.append('trim_poly_g',  document.getElementById('trim-poly-g').checked);
+    // Kirim adapter_kit berdasarkan library prep yang dipilih di Step 1
+    const lib = document.getElementById('library-prep') ? document.getElementById('library-prep').value : 'truseq_pe';
+    fd.append('adapter_kit', lib);
+
+    setStatus(2, 'running');
+    log(2, `Memulai Trimming...`);
+
+    try {
+      const res = await fetch(`${API}/api/analyses/${analysisId}/trimming/run`, { method:'POST', body:fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(JSON.stringify(data));
+      log(2, `Trimming dimulai`);
+      pollStatus(2, 'trimming');
+    } catch(e) {
+      log(2, `Error: ${e.message}`, true);
+      setStatus(2, 'failed');
+      btn.disabled = false;
+      btn.innerHTML = '▶ Run Trimming';
+    }
+  }
+
+  async function runAlignment() {
+    const btn = document.getElementById('btn-align');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Running...';
+
+    const fd = new FormData();
+    fd.append('mark_duplicates', document.getElementById('mark-dup').checked);
+
+    setStatus(3, 'running');
+    log(3, `Memulai Alignment...`);
+
+    try {
+      const res = await fetch(`${API}/api/analyses/${analysisId}/alignment/run`, { method:'POST', body:fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(JSON.stringify(data));
+      log(3, `Alignment dimulai`);
+      pollStatus(3, 'alignment');
+    } catch(e) {
+      log(3, `Error: ${e.message}`, true);
+      setStatus(3, 'failed');
+      btn.disabled = false;
+      btn.innerHTML = '▶ Run Alignment';
+    }
+  }
+
+  async function runVariantCalling() {
+    const btn = document.getElementById('btn-vc');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Running...';
+
+    const fd = new FormData();
+    fd.append('min_qual',  document.getElementById('min-qual').value);
+    fd.append('min_dp',    document.getElementById('min-dp').value);
+    fd.append('min_gq',    document.getElementById('min-gq').value);
+    fd.append('max_depth', document.getElementById('max-depth').value);
+    const sex = document.getElementById('sample-sex').value;
+    if (sex) fd.append('sample_sex', sex);
+
+    setStatus(4, 'running');
+    log(4, `Memulai Variant Calling...`);
+
+    try {
+      const res = await fetch(`${API}/api/analyses/${analysisId}/variant-calling/run`, { method:'POST', body:fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(JSON.stringify(data));
+      log(4, `Variant Calling dimulai`);
+      pollStatus(4, 'variant_calling');
+    } catch(e) {
+      log(4, `Error: ${e.message}`, true);
+      setStatus(4, 'failed');
+      btn.disabled = false;
+      btn.innerHTML = '▶ Run Variant Calling';
+    }
+  }
+
+  // ── Polling ────────────────────────────────────────────────────────────────
+  function pollStatus(step, stageKey) {
+    if (pollIntervals[step]) clearInterval(pollIntervals[step]);
+    pollIntervals[step] = setInterval(async () => {
+      try {
+        const res  = await fetch(`${API}/api/analyses/${analysisId}/status`);
+        const data = await res.json();
+        const stage = data.stages?.[stageKey];
+        if (!stage) return;
+
+        const s = stage.status;
+        setStatus(step, s);
+        log(step, `Status: ${s} (progress: ${stage.progress}%)`);
+
+        if (s === 'completed') {
+          clearInterval(pollIntervals[step]);
+          // Reset button step yang baru selesai — hapus onclick agar tidak bisa diklik lagi
+          const btnMap = {1:'btn-qc', 2:'btn-trim', 3:'btn-align', 4:'btn-vc'};
+          const btnId = btnMap[step];
+          if (btnId) {
+            const btn = document.getElementById(btnId);
+            if (btn) {
+              btn.disabled = true;
+              btn.onclick = null;
+              btn.innerHTML = '✓ Selesai';
+              btn.style.background = '#4caf50';
+              btn.style.cursor = 'not-allowed';
+            }
+          }
+          onStepCompleted(step, data);
+        } else if (s === 'failed' || s === 'cancelled') {
+          clearInterval(pollIntervals[step]);
+          log(step, `Failed: ${stage.error || 'unknown error'}`, true);
+          const btn = document.getElementById(`btn-${['','qc','trim','align','vc'][step]}`);
+          if (btn) { btn.disabled=false; btn.innerHTML='▶ Retry'; }
+        }
+      } catch(e) {
+        log(step, `Polling error: ${e.message}`, true);
+      }
+    }, 5000);
+  }
+
+  function onStepCompleted(step, jobData) {
+    if (step === 1) {
+      // Step 2 sudah dibuka saat upload selesai; Step 1 hanya menampilkan hasil QC.
+      log(1, '✅ FastQC selesai.');
+    } else if (step === 2) {
+      enableCard(3);
+      setStatus(3, 'not_started');
+      const btn3 = document.getElementById('btn-align');
+      if (btn3) { btn3.disabled = false; btn3.style.opacity = '1'; btn3.style.cursor = 'pointer'; }
+      log(2, '✅ Trimming selesai. Lanjut ke Step 3 (Alignment).');
+    } else if (step === 3) {
+      enableCard(4);
+      setStatus(4, 'not_started');
+      const btn4 = document.getElementById('btn-vc');
+      if (btn4) { btn4.disabled = false; btn4.style.opacity = '1'; btn4.style.cursor = 'pointer'; }
+      // Tampilkan coverage
+      const cov = jobData.coverage;
+      if (cov) {
+        const warn = cov.warning ? `<div class="coverage-warning">⚠️ ${cov.warning}</div>` : '';
+        document.getElementById('coverage-result').style.display = 'block';
+        document.getElementById('coverage-result').innerHTML = `
+          <div class="coverage-grid">
+            <div class="coverage-item"><div class="coverage-value">${cov.mean_depth}x</div><div class="coverage-label">Mean Depth</div></div>
+            <div class="coverage-item"><div class="coverage-value">${cov.pct_bases_20x}%</div><div class="coverage-label">≥20x</div></div>
+            <div class="coverage-item"><div class="coverage-value">${cov.pct_bases_10x}%</div><div class="coverage-label">≥10x</div></div>
+            <div class="coverage-item"><div class="coverage-value">${(cov.covered_bases||0).toLocaleString()}</div><div class="coverage-label">Covered Bases</div></div>
+          </div>
+          ${warn}
+        `;
+      }
+      log(3, '✅ Alignment selesai. Lanjut ke Step 4 (Variant Calling).');
+    } else if (step === 4) {
+      enableCard(5);
+      setStatus(5, 'completed');
+      showResults();
+      log(4, '✅ Variant Calling selesai!');
+    }
+  }
+
+  async function showResults() {
+    const content = document.getElementById('result-content');
+    content.innerHTML = `
+      <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap">
+        <a href="${API}/api/pipeline/${analysisId}/variant-calling/download" 
+           class="btn btn-primary" download>⬇ Download VCF.gz</a>
+        <a href="${API}/api/pipeline/${analysisId}/alignment/download" 
+           class="btn btn-secondary" download>⬇ Download BAM</a>
+        <a href="${API}/api/pipeline/${analysisId}/fastqc/download" 
+           class="btn btn-secondary" download>⬇ FastQC Report</a>
+      </div>
+      <div class="result-box success" style="margin-top:16px">
+Analysis ${analysisId} selesai.
+VCF: /api/pipeline/${analysisId}/variant-calling/download
+BAM: /api/pipeline/${analysisId}/alignment/download
+      </div>
+    `;
+  }
+
+  // Init
+  updateFilterExpr();
+</script>
+</body>
+</html>

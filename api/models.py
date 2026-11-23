@@ -50,11 +50,13 @@ class JobStatus(str, Enum):
 
 # Alias untuk backward compat internal
 class StageStatus(str, Enum):
-    PENDING   = "pending"
-    RUNNING   = "running"
-    COMPLETED = "completed"
-    FAILED    = "failed"
-    SKIPPED   = "skipped"
+    NOT_STARTED = "not_started"   # Belum dimulai (sesuai UI wizard)
+    PENDING     = "pending"       # Sudah di-queue tapi belum jalan
+    RUNNING     = "running"
+    COMPLETED   = "completed"
+    FAILED      = "failed"
+    SKIPPED     = "skipped"
+    CANCELLED   = "cancelled"     # Dibatalkan user (POST .../cancel)
 
 
 # ── Response Models ───────────────────────────────────────────────────────────

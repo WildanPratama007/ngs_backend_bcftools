@@ -10,6 +10,8 @@ Fix:
 - Error response format sesuai API Contract
 """
 
+import glob
+import logging
 import os
 import re
 import asyncio
@@ -25,10 +27,17 @@ from .models import (
     AnalysisMode, EndType, ReferenceGenome, VariantType, TrimPreset,
     SubmitResponse, PipelineStatus, StageStatus
 )
-from .config import UPLOAD_DIR, RESULTS_DIR
+from .config import UPLOAD_DIR, RESULTS_DIR, ADAPTER_KIT_MAP, CORS_ORIGINS, PIPELINE_MODE
 from . import job_manager
 from . import pipeline_runner
+from . import preflight
+from .contract import router as contract_router, cancel_run
+from .errors import error_response, install_handlers
 from .pipeline_runner import sanitize_sample_name
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("ngs.api")
 
 # ── App Init ──────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -37,10 +46,16 @@ app = FastAPI(
     version     = "1.1.0",
 )
 
+install_handlers(app)
+app.include_router(contract_router)
+
+# Origin dari env CORS_ORIGINS. Credentials hanya diaktifkan untuk daftar origin eksplisit
+# (browser menolak kombinasi wildcard "*" dengan credentials).
+_wildcard = "*" in CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["*"],
-    allow_credentials = True,
+    allow_origins     = ["*"] if _wildcard else CORS_ORIGINS,
+    allow_credentials = not _wildcard,
     allow_methods     = ["*"],
     allow_headers     = ["*"],
 )
@@ -48,8 +63,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
-    """Recover jobs saat server start — mark job running sebagai failed."""
+    """Recover jobs saat server start dan cek tool pipeline."""
     job_manager.recover_jobs()
+    preflight.run_preflight()
+    if _wildcard:
+        logger.warning("CORS_ORIGINS='*' — isi domain frontend di production.")
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -95,12 +113,9 @@ def _extract_sample_name(filename: str, end_type: EndType) -> str:
     # Hapus ekstensi
     name = re.sub(r'\.(fastq\.gz|fq\.gz|fastq|fq)$', '', name, flags=re.IGNORECASE)
     if end_type == EndType.PE:
-        # Format Illumina: _R1_001, _R1_002, _1_001, dll
-        name = re.sub(r'[_\.]R[12][_\.]?\d*$', '', name)
-        name = re.sub(r'[_\.]?[12][_\.]?\d*$', '', name)
-        # Format sederhana: _R1, _1
-        name = re.sub(r'[_\.]R[12]$', '', name)
-        name = re.sub(r'[_\.][12]$', '', name)
+        # Hapus penanda read hanya sekali: _R1, _R1_001, .R1, _1, _1_001
+        # (regex lama dijalankan berurutan dan ikut memotong digit di akhir nama sampel)
+        name = re.sub(r'[_.]R?1(?:_\d+)?$', '', name)
     return sanitize_sample_name(name) or "sample"
 
 
@@ -138,25 +153,91 @@ def get_stage_output(job_id: str, stage: str) -> Optional[str]:
     for path in paths.get(stage, []):
         if os.path.exists(path):
             return path
+
+    # FastQC menamai output dari nama file input (PE: dua laporan, R1 dan R2) — ambil yang ada
+    if stage == "fastqc":
+        reports = sorted(glob.glob(os.path.join(base, "fastqc", "*_fastqc.html")))
+        if reports:
+            return reports[0]
     return None
 
 
 def _validate_fastq_filename(filename: str) -> bool:
     """
-    Fix #23: validasi ekstensi filename sesuai API Contract.
-    Hanya .fastq.gz atau .fq.gz (huruf kecil), max 255 karakter.
+    Validasi ekstensi filename sesuai API Contract.
+    Production: .fastq.gz atau .fq.gz
+    Testing: juga terima .fastq dan .fq (uncompressed)
     """
     if not filename or len(filename) > 255:
         return False
-    return bool(re.search(r'\.(fastq\.gz|fq\.gz)$', filename))
+    return bool(re.search(r'\.(fastq\.gz|fq\.gz|fastq|fq)$', filename, re.IGNORECASE))
 
 
-def _error_response(code: str, message: str, http_status: int, details: dict = None):
-    """Format error sesuai API Contract section 4."""
-    body = {"error": {"code": code, "message": message}}
-    if details:
-        body["error"]["details"] = details
-    raise HTTPException(status_code=http_status, detail=body)
+_error_response = error_response   # envelope kontrak: lihat api/errors.py
+
+
+def _require_pipeline_ready():
+    """Tolak pekerjaan baru kalau pipeline dimatikan atau tool wajib tidak lengkap (kontrak: 503)."""
+    if PIPELINE_MODE == "disabled":
+        _error_response("PIPELINE_DISABLED", "Pipeline dinonaktifkan di server ini.", 503)
+    missing = preflight.missing_required()
+    if missing:
+        logger.error("Pipeline belum siap: %s", "; ".join(missing))
+        _error_response("PIPELINE_NOT_CONFIGURED", "Tool pipeline belum lengkap di server.", 503)
+
+
+def _require_valid_id(analysis_id: str):
+    if not job_manager.is_valid_id(analysis_id):
+        _error_response("VALIDATION_FAILED",
+                        "analysis_id hanya boleh huruf, angka, '_', '-', '.' (maks 64, diawali huruf/angka).", 400,
+                        {"fields": [{"path": "analysis_id", "reason": "format tidak valid"}]})
+
+
+def _validate_trim_params(quality: int, min_len: int):
+    if not (10 <= quality <= 40):
+        _error_response("VALIDATION_FAILED", "trim_quality harus antara 10-40.", 400)
+    if not (20 <= min_len <= 100):
+        _error_response("VALIDATION_FAILED", "trim_min_len harus antara 20-100.", 400)
+
+
+def _validate_variant_params(min_qual: int, min_dp: int, min_gq: int,
+                             max_depth: int, min_bq: int, min_mq: int):
+    if not (0 <= min_qual <= 999):
+        _error_response("VALIDATION_FAILED", "min_qual harus antara 0-999.", 400)
+    if not (1 <= min_dp <= 500):
+        _error_response("VALIDATION_FAILED", "min_dp harus antara 1-500.", 400)
+    if not (0 <= min_gq <= 99):
+        _error_response("VALIDATION_FAILED", "min_gq harus antara 0-99.", 400)
+    if not (100 <= max_depth <= 10000):
+        _error_response("VALIDATION_FAILED", "max_depth harus antara 100-10000.", 400)
+    if not (0 <= min_bq <= 40):
+        _error_response("VALIDATION_FAILED", "min_bq harus antara 0-40.", 400)
+    if not (0 <= min_mq <= 60):
+        _error_response("VALIDATION_FAILED", "min_mq harus antara 0-60.", 400)
+
+
+def _validate_adapter_kit(adapter_kit: Optional[str]):
+    if adapter_kit and adapter_kit not in ADAPTER_KIT_MAP:
+        _error_response("VALIDATION_FAILED", f"adapter_kit tidak dikenal: '{adapter_kit}'.", 400,
+                        {"allowed": sorted(ADAPTER_KIT_MAP)})
+
+
+def _validate_sample_sex(sample_sex: Optional[str]) -> Optional[str]:
+    if sample_sex and sample_sex.lower() not in ("male", "female"):
+        _error_response("VALIDATION_FAILED", "sample_sex harus 'male' atau 'female'.", 400)
+    return sample_sex.lower() if sample_sex else None
+
+
+def _get_job_or_404(analysis_id: str) -> dict:
+    job = job_manager.get_job(analysis_id)
+    if not job:
+        _error_response("NOT_FOUND", f"Analysis '{analysis_id}' tidak ditemukan. Jalankan Step 1 dulu.", 404)
+    return job
+
+
+def _ensure_not_running(job: dict, stage: str):
+    if job["stages"][stage]["status"] == "running":
+        _error_response("STATUS_CONFLICT", f"Step '{stage}' sedang berjalan.", 409)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -177,6 +258,7 @@ async def submit_pipeline(
     trim_min_len:  Optional[int]  = Form(None),   # 20-100bp, default 36
     trim_adapter:  Optional[bool] = Form(None),   # default True
     trim_poly_g:   Optional[bool] = Form(None),   # default False (NovaSeq only)
+    adapter_kit:   Optional[str]  = Form(None),   # truseq_pe, truseq_se, nextera, ... (default: ikut SE/PE)
     # ── Alignment parameters ─────────────────────────────────────────────────
     mark_duplicates: Optional[bool] = Form(None),
     # ── Variant calling parameters ───────────────────────────────────────────
@@ -191,8 +273,9 @@ async def submit_pipeline(
     fastq_r2:      Optional[UploadFile] = File(None),
     bed_file:      Optional[UploadFile] = File(None),
 ):
+    _require_pipeline_ready()
     if variant_type == VariantType.SOMATIC:
-        _error_response("VALIDATION_FAILED", "Somatic variant calling belum didukung.", 422)
+        _error_response("VALIDATION_FAILED", "Somatic variant calling belum didukung.", 400)
 
     if end_type == EndType.PE and (not fastq_r1 or not fastq_r2):
         _error_response("VALIDATION_FAILED", "PE mode membutuhkan fastq_r1 dan fastq_r2.", 400)
@@ -221,9 +304,7 @@ async def submit_pipeline(
         )
 
     # Fix #19: validasi nilai sex
-    if sample_sex and sample_sex.lower() not in ("male", "female"):
-        _error_response("VALIDATION_FAILED", "sample_sex harus 'male' atau 'female'.", 400)
-    sex = sample_sex.lower() if sample_sex else None
+    sex = _validate_sample_sex(sample_sex)
 
     # ── Resolve trimming parameters ──────────────────────────────────────────
     # Preset menimpa nilai individual bila keduanya diberikan
@@ -245,10 +326,8 @@ async def submit_pipeline(
         final_trim_poly_g  = trim_poly_g  if trim_poly_g  is not None else False
 
     # Validasi range
-    if not (10 <= final_trim_quality <= 40):
-        _error_response("VALIDATION_FAILED", "trim_quality harus antara 10-40.", 400)
-    if not (20 <= final_trim_min_len <= 100):
-        _error_response("VALIDATION_FAILED", "trim_min_len harus antara 20-100.", 400)
+    _validate_trim_params(final_trim_quality, final_trim_min_len)
+    _validate_adapter_kit(adapter_kit)
 
     # Resolve mark_duplicates — default True
     final_mark_duplicates = mark_duplicates if mark_duplicates is not None else True
@@ -261,19 +340,8 @@ async def submit_pipeline(
     final_min_bq    = min_bq    if min_bq    is not None else 20
     final_min_mq    = min_mq    if min_mq    is not None else 20
 
-    # Validasi range variant calling params
-    if not (0 <= final_min_qual <= 999):
-        _error_response("VALIDATION_FAILED", "min_qual harus antara 0-999.", 400)
-    if not (1 <= final_min_dp <= 500):
-        _error_response("VALIDATION_FAILED", "min_dp harus antara 1-500.", 400)
-    if not (0 <= final_min_gq <= 99):
-        _error_response("VALIDATION_FAILED", "min_gq harus antara 0-99.", 400)
-    if not (100 <= final_max_depth <= 10000):
-        _error_response("VALIDATION_FAILED", "max_depth harus antara 100-10000.", 400)
-    if not (0 <= final_min_bq <= 40):
-        _error_response("VALIDATION_FAILED", "min_bq harus antara 0-40.", 400)
-    if not (0 <= final_min_mq <= 60):
-        _error_response("VALIDATION_FAILED", "min_mq harus antara 0-60.", 400)
+    _validate_variant_params(final_min_qual, final_min_dp, final_min_gq,
+                             final_max_depth, final_min_bq, final_min_mq)
 
     # Ekstrak dan sanitasi sample name
     source_filename = fastq_r1.filename if end_type == EndType.PE else fastq.filename
@@ -304,6 +372,7 @@ async def submit_pipeline(
             end_type      = end_type,
             reference     = reference,
             sample_sex    = sex,
+            adapter_kit   = adapter_kit,
             trim_quality  = final_trim_quality,
             trim_min_len    = final_trim_min_len,
             trim_adapter    = final_trim_adapter,
@@ -428,17 +497,281 @@ async def variant_calling_status(job_id: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# WIZARD ENDPOINTS — Step-by-step (sesuai UI wizard)
+# Setiap step dijalankan secara terpisah dengan button "Run" di UI
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/analyses/{analysis_id}/qc/run", tags=["Wizard"])
+async def run_qc(
+    analysis_id: str,
+    fastq:         Optional[UploadFile] = File(None),
+    fastq_r1:      Optional[UploadFile] = File(None),
+    fastq_r2:      Optional[UploadFile] = File(None),
+    bed_file:      Optional[UploadFile] = File(None),
+    end_type:      EndType         = Form(EndType.SE),
+    reference:     ReferenceGenome = Form(ReferenceGenome.GRCh38),
+    analysis_mode: AnalysisMode    = Form(AnalysisMode.WGS),
+    adapter_kit:   Optional[str]   = Form(None),  # truseq_pe, nextera, truseq_se, dll
+):
+    """
+    Step 1 — Upload FASTQ & jalankan FastQC.
+    Upload selesai sebelum response dikembalikan; FastQC lanjut di background.
+    Trimming (Step 2) bisa langsung dijalankan tanpa menunggu FastQC selesai.
+    """
+    _require_valid_id(analysis_id)
+    _require_pipeline_ready()
+    if end_type == EndType.PE and (not fastq_r1 or not fastq_r2):
+        _error_response("VALIDATION_FAILED", "PE mode membutuhkan fastq_r1 dan fastq_r2.", 400)
+    if end_type == EndType.SE and not fastq:
+        _error_response("VALIDATION_FAILED", "SE mode membutuhkan fastq.", 400)
+
+    files_to_validate = [fastq_r1, fastq_r2] if end_type == EndType.PE else [fastq]
+    for f in [x for x in files_to_validate if x]:
+        if not _validate_fastq_filename(f.filename or ""):
+            _error_response("VALIDATION_FAILED", f"File {f.filename} harus berekstensi .fastq.gz atau .fq.gz", 400)
+
+    needs_bed = analysis_mode in (AnalysisMode.WES, AnalysisMode.TARGETED)
+    if needs_bed and not bed_file:
+        _error_response("VALIDATION_FAILED", f"{analysis_mode.value} membutuhkan bed_file.", 400)
+    _validate_adapter_kit(adapter_kit)
+
+    source_filename = fastq_r1.filename if end_type == EndType.PE else fastq.filename
+    sample_name = _extract_sample_name(source_filename or "sample", end_type)
+
+    # Gunakan analysis_id dari frontend (atau buat baru)
+    job_id  = analysis_id
+    job_dir = os.path.join(UPLOAD_DIR, job_id)
+
+    existing = job_manager.get_job(job_id)
+    if existing:
+        for stage in ("fastqc", "trimming", "alignment", "variant_calling"):
+            _ensure_not_running(existing, stage)
+
+    # Simpan FASTQ
+    fastq_path = fastq_r1_path = fastq_r2_path = None
+    if end_type == EndType.PE:
+        fastq_r1_path = await save_upload(fastq_r1, job_dir)
+        fastq_r2_path = await save_upload(fastq_r2, job_dir)
+    else:
+        fastq_path = await save_upload(fastq, job_dir)
+
+    bed_path = await save_upload(bed_file, job_dir) if needs_bed else None
+
+    # Buat job baru, atau perbarui metadata kalau analysis_id dipakai ulang
+    if not existing:
+        job_manager.create_job_with_id(job_id, sample_name, analysis_mode, end_type, reference, VariantType.GERMLINE)
+    if existing:  # input baru → hasil step lama tidak berlaku lagi
+        for stage in ("fastqc", "trimming", "alignment", "variant_calling"):
+            job_manager.reset_stage(job_id, stage)
+    job_manager.update_job_fields(
+        job_id,
+        coverage      = None,
+        sample_name   = sample_name,
+        analysis_mode = analysis_mode.value,
+        end_type      = end_type.value,
+        reference     = reference.value,
+        adapter_kit   = adapter_kit,
+        fastq_path    = fastq_path,
+        fastq_r1      = fastq_r1_path,
+        fastq_r2      = fastq_r2_path,
+        bed_path      = bed_path,
+    )
+
+    # Jalankan hanya QC entry point
+    asyncio.create_task(
+        pipeline_runner.run_step(
+            job_id      = job_id,
+            step        = "qc",
+            fastq_path  = fastq_path,
+            fastq_r1    = fastq_r1_path,
+            fastq_r2    = fastq_r2_path,
+            end_type    = end_type,
+            reference   = reference,
+        )
+    )
+
+    return {"analysis_id": job_id, "step": "qc", "status": "running",
+            "message": f"FastQC dimulai untuk sampel '{sample_name}'"}
+
+
+@app.post("/api/analyses/{analysis_id}/trimming/run", tags=["Wizard"])
+async def run_trimming(
+    analysis_id: str,
+    trim_preset:  Optional[TrimPreset] = Form(None),
+    trim_quality: Optional[int]  = Form(None),
+    trim_min_len: Optional[int]  = Form(None),
+    trim_adapter: Optional[bool] = Form(None),
+    trim_poly_g:  Optional[bool] = Form(None),
+    adapter_kit:  Optional[str]  = Form(None),   # truseq_pe, nextera, dll (default: kit dari Step 1)
+):
+    """
+    Step 2 — Trimming dengan parameter yang bisa diatur user.
+    Hanya butuh upload FASTQ dari Step 1 (selesai saat /qc/run mengembalikan 200).
+    Tidak perlu menunggu FastQC selesai; QC dan Trimming boleh jalan bersamaan.
+    """
+    _require_pipeline_ready()
+    job = _get_job_or_404(analysis_id)
+    _ensure_not_running(job, "trimming")
+
+    # Cek step 1 sudah selesai (FASTQ sudah ada)
+    if not os.path.exists(os.path.join(UPLOAD_DIR, analysis_id)):
+        _error_response("STATUS_CONFLICT", "Upload belum selesai. Jalankan Step 1 (QC) dulu.", 409)
+
+    # Resolve trim params
+    if trim_preset == TrimPreset.CLINICAL:
+        q, ml = 30, 36
+    elif trim_preset == TrimPreset.RESEARCH:
+        q, ml = 20, 36
+    else:
+        q  = trim_quality if trim_quality is not None else 20
+        ml = trim_min_len if trim_min_len is not None else 36
+    _validate_trim_params(q, ml)
+    _validate_adapter_kit(adapter_kit)
+
+    # Trimming baru → hasil Alignment dan Variant Calling sebelumnya tidak berlaku lagi
+    for downstream in ("alignment", "variant_calling"):
+        if job["stages"][downstream]["status"] == "running":
+            _error_response("STATUS_CONFLICT", f"Step '{downstream}' sedang berjalan.", 409)
+        job_manager.reset_stage(analysis_id, downstream)
+
+    asyncio.create_task(
+        pipeline_runner.run_step(
+            job_id       = analysis_id,
+            step         = "trimming",
+            trim_quality = q,
+            trim_min_len = ml,
+            trim_adapter = trim_adapter if trim_adapter is not None else True,
+            trim_poly_g  = trim_poly_g  if trim_poly_g  is not None else False,
+            adapter_kit  = adapter_kit,
+        )
+    )
+
+    return {"analysis_id": analysis_id, "step": "trimming", "status": "running"}
+
+
+@app.post("/api/analyses/{analysis_id}/alignment/run", tags=["Wizard"])
+async def run_alignment(
+    analysis_id:     str,
+    mark_duplicates: Optional[bool] = Form(None),
+):
+    """
+    Step 3 — Alignment (BWA MEM + MarkDuplicates + Coverage). SE dan PE.
+    Membutuhkan Step 2 (Trimming) sudah selesai.
+    """
+    _require_pipeline_ready()
+    job = _get_job_or_404(analysis_id)
+    _ensure_not_running(job, "alignment")
+
+    trimming_status = job["stages"]["trimming"]["status"]
+    if trimming_status != "completed":
+        _error_response("STATUS_CONFLICT", "Trimming belum selesai. Jalankan Step 2 dulu.", 409)
+    if not pipeline_runner.find_trimmed_reads(analysis_id):
+        _error_response("NOT_FOUND", "File hasil Trimming tidak ditemukan di disk. Jalankan Step 2 ulang.", 404)
+
+    # Alignment baru → Variant Calling sebelumnya tidak berlaku lagi
+    _ensure_not_running(job, "variant_calling")
+    job_manager.reset_stage(analysis_id, "variant_calling")
+
+    asyncio.create_task(
+        pipeline_runner.run_step(
+            job_id          = analysis_id,
+            step            = "alignment",
+            mark_duplicates = mark_duplicates if mark_duplicates is not None else True,
+        )
+    )
+
+    return {"analysis_id": analysis_id, "step": "alignment", "status": "running"}
+
+
+@app.post("/api/analyses/{analysis_id}/variant-calling/run", tags=["Wizard"])
+async def run_variant_calling(
+    analysis_id: str,
+    min_qual:    Optional[int] = Form(None),
+    min_dp:      Optional[int] = Form(None),
+    min_gq:      Optional[int] = Form(None),
+    max_depth:   Optional[int] = Form(None),
+    min_bq:      Optional[int] = Form(None),
+    min_mq:      Optional[int] = Form(None),
+    sample_sex:  Optional[str] = Form(None),   # male/female → ploidy chrX/chrY
+):
+    """
+    Step 4 — Variant Calling (BCFTools mpileup → call → norm → filter).
+    Membutuhkan Step 3 (Alignment) sudah selesai.
+    """
+    _require_pipeline_ready()
+    job = _get_job_or_404(analysis_id)
+    _ensure_not_running(job, "variant_calling")
+
+    if job["stages"]["alignment"]["status"] != "completed":
+        _error_response("STATUS_CONFLICT", "Alignment belum selesai. Jalankan Step 3 dulu.", 409)
+
+    sex = _validate_sample_sex(sample_sex)
+    p = {
+        "min_qual":  min_qual  if min_qual  is not None else 20,
+        "min_dp":    min_dp    if min_dp    is not None else 10,
+        "min_gq":    min_gq    if min_gq    is not None else 20,
+        "max_depth": max_depth if max_depth is not None else 500,
+        "min_bq":    min_bq    if min_bq    is not None else 20,
+        "min_mq":    min_mq    if min_mq    is not None else 20,
+    }
+    _validate_variant_params(**p)
+
+    # Cari BAM file dari step sebelumnya
+    sample = job["sample_name"]
+    bam_path = os.path.join(RESULTS_DIR, analysis_id, sample, "bwa", f"{sample}.markdup.bam")
+    if not os.path.exists(bam_path):
+        _error_response("NOT_FOUND", "BAM file dari step Alignment tidak ditemukan.", 404)
+
+    asyncio.create_task(
+        pipeline_runner.run_step(
+            job_id    = analysis_id,
+            step      = "variant_calling",
+            bam_file  = bam_path,
+            sample_sex = sex,
+            **p,
+        )
+    )
+
+    return {"analysis_id": analysis_id, "step": "variant_calling", "status": "running"}
+
+
+@app.post("/api/analyses/{analysis_id}/cancel", tags=["Wizard"])
+async def cancel_analysis(analysis_id: str):
+    """
+    Batalkan step yang sedang antre/berjalan. Step antre langsung CANCELLED; step berjalan
+    dihentikan dan menjadi CANCELLED setelah Nextflow berhenti (jobStatus CANCEL_REQUESTED).
+    """
+    job = _get_job_or_404(analysis_id)
+    return {"analysis_id": analysis_id, "jobStatus": cancel_run(job)}
+
+
+@app.get("/api/analyses/{analysis_id}/status", tags=["Wizard"])
+async def get_analysis_status(analysis_id: str):
+    """Status semua step untuk wizard UI."""
+    job = job_manager.get_job(analysis_id)
+    if not job:
+        _error_response("NOT_FOUND", f"Analysis '{analysis_id}' tidak ditemukan.", 404)
+    job_manager.update_elapsed(analysis_id)
+    return job_manager.get_job(analysis_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ENDPOINT: Health & Info
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/health", tags=["System"])
-async def health_check():
+async def health_check(refresh: bool = False):
+    """`?refresh=true` menjalankan ulang pemeriksaan tool (mis. setelah install bcftools baru)."""
+    result = preflight.run_preflight() if refresh else preflight.last_result()
     return {
-        "status":   "ok",
-        "version":  "1.1.0",
-        "backend":  "BCFTools",
-        "pipeline": "FastQC → Trimmomatic → BWA MEM → MarkDup → BCFTools mpileup/call/norm/filter",
-        "time":     datetime.utcnow().isoformat() + "Z",
+        "status":        "ok" if result.get("ok") else "degraded",
+        "version":       "1.1.0",
+        "backend":       "BCFTools",
+        "pipelineMode":  PIPELINE_MODE,
+        "pipeline":      "FastQC → Trimmomatic → BWA MEM → MarkDup → BCFTools mpileup/call/norm/filter",
+        "missing":       preflight.missing_required(),
+        "checks":        result,
+        "time":          datetime.utcnow().isoformat() + "Z",
     }
 
 

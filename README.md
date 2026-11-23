@@ -138,7 +138,9 @@ Input: FASTQ (SE atau PE)
 | **Trimmomatic** | 0.39 | Adapter & quality trimming | conda |
 | **BWA MEM** | 0.7.19 | Short read alignment | conda |
 | **Samtools** | 1.13 | Sort, index, markdup, coverage | apt `/usr/bin/` |
-| **BCFTools** | 1.13 | mpileup, call, norm, filter, concat | apt `/usr/bin/` |
+| **BCFTools** | ≥ 1.21 | mpileup, call, norm, filter, concat | build dari source → `/usr/local/bin/bcftools` |
+
+> BCFTools ≥ 1.21 wajib: pipeline memakai `concat -a --rm-dups all` (opsi `--rm-dups` baru ada di versi baru dan hanya valid bersama `-a`). Versi apt 1.13 tidak cukup.
 
 ---
 
@@ -175,10 +177,18 @@ TruSeq2-PE.fa      ← Data lama (HiSeq 2000)
 NexteraPE-PE.fa    ← Nextera XT kit
 TruSeq3-SE.fa      ← Single-End
 ```
-Ganti adapter di `nextflow.config`:
-```groovy
-adapter_file = "/path/to/NexteraPE-PE.fa"
-```
+Adapter dipilih lewat parameter `adapter_kit` (wizard: dikirim di Step 1 dan dipakai di Step 2; `/api/pipeline/submit`: parameter form).
+Kalau kosong, dipakai TruSeq SE untuk data SE dan TruSeq PE untuk data PE.
+
+| `adapter_kit` | File adapter (override lewat `.env`) |
+|---|---|
+| `truseq_pe`, `truseq_pcr_free` | `ADAPTER_FILE` (TruSeq3-PE-2.fa) |
+| `truseq_se` | `ADAPTER_FILE_SE` (TruSeq3-SE.fa) |
+| `nextera`, `nextera_dna_flex` | `ADAPTER_NEXTERA` (NexteraPE-PE.fa) |
+
+`trim_poly_g=true` menambah satu langkah `ILLUMINACLIP` dengan sekuens poly-G yang dibuat otomatis di tiap task (untuk NovaSeq/NextSeq).
+
+Kalau Trimmomatic menyisakan 0 reads, error yang dikembalikan di `stages.trimming.error` menyebutkan apakah `trim_quality` terlalu tinggi.
 
 ---
 
@@ -187,7 +197,7 @@ adapter_file = "/path/to/NexteraPE-PE.fa"
 | Parameter API | Type | Default | Deskripsi |
 |---|---|---|---|
 | `mark_duplicates` | bool | true | Tandai PCR duplicate. `false` untuk PCR-free library atau amplicon sequencing |
-| `sample_sex` | string | null | `male` atau `female` — untuk ploidy chrX/chrY yang benar |
+| `sample_sex` | string | null | `male` atau `female` — ploidy chrX/chrY. Dipakai saat variant calling (wizard: dikirim di Step 4) |
 
 **Kapan `mark_duplicates=false`:**
 
@@ -316,6 +326,43 @@ curl -X POST http://localhost:8001/api/pipeline/submit \
 
 > File harus berekstensi `.fastq.gz` atau `.fq.gz`
 
+### Wizard — Satu Step per Request
+
+Pipeline yang sama bisa dijalankan step demi step (dipakai `test_wizard.html`). Nextflow script-nya terpisah dari pipeline penuh: `pipeline/main_wizard.nf` (entry `QC`, `TRIMMING`, `ALIGNMENT`, `VARIANT_CALLING`), sedangkan `pipeline/main.nf` hanya untuk `/api/pipeline/submit`.
+
+| Step | Endpoint | Syarat |
+|---|---|---|
+| 1 Upload + FastQC | `POST /api/analyses/{id}/qc/run` | — (form: `end_type`, `reference`, `analysis_mode`, `adapter_kit`, FASTQ, `bed_file` untuk WES/Targeted) |
+| 2 Trimming | `POST /api/analyses/{id}/trimming/run` | Upload selesai. **Tidak menunggu FastQC** |
+| 3 Alignment | `POST /api/analyses/{id}/alignment/run` | Trimming `completed` (SE dan PE) |
+| 4 Variant Calling | `POST /api/analyses/{id}/variant-calling/run` | Alignment `completed`; param `sample_sex`, `min_qual`, `min_dp`, `min_gq`, `max_depth`, `min_bq`, `min_mq` |
+| Status | `GET /api/analyses/{id}/status` | Status + progress + error tiap stage |
+
+- Step 1 dan 2 independen dan boleh berjalan bersamaan. Hanya Step 2 → 3 → 4 yang berurutan.
+- Menjalankan ulang sebuah step menghapus hasil step di hilirnya (mis. Trimming ulang me-reset Alignment dan Variant Calling).
+- Step yang sedang `running` menolak request ganda dengan `409 STATUS_CONFLICT`.
+- Untuk WES/Targeted, BED yang di-upload di Step 1 dipakai oleh coverage (Step 3) dan variant calling (Step 4).
+- Pesan error dari task Nextflow yang gagal (blok `Command error:`) disimpan di `stages.<stage>.error`.
+- `analysis_id`: huruf/angka/`_`/`-`/`.`, maksimal 64 karakter, diawali huruf atau angka (dipakai sebagai nama folder). ID lain ditolak dengan `VALIDATION_FAILED`.
+
+### Endpoint sesuai API Contract (`/api/secondary-analysis`)
+
+Bagian kontrak yang tidak butuh AWS (`api/contract.py`):
+
+| Operasi kontrak | Endpoint | Catatan |
+|---|---|---|
+| getStatus | `GET /api/secondary-analysis/analyses/{id}/status` | `Status_View`: `analysisStatus`, `pipelineMode`, `run` (jobId, jobStatus, stage, progress, message, errorMessage, submittedAt, startedAt, finishedAt, mode). Waktu ISO 8601 UTC |
+| getStatusBatch | `POST /api/secondary-analysis/status/batch` | 1–25 id unik; id tak ditemukan → `found: false` |
+| cancel | `POST /api/secondary-analysis/analyses/{id}/cancel` body `{"jobId": "..."}` | Run antre → `CANCELLED`; Run berjalan → `CANCEL_REQUESTED` (Nextflow dihentikan, stage jadi `cancelled`) |
+
+- Pembatalan juga tersedia tanpa body untuk wizard: `POST /api/analyses/{id}/cancel`.
+- Semua error memakai envelope `{"error": {"code", "message", "details"}}`. Validasi request → `VALIDATION_FAILED` (400), tool pipeline tidak lengkap → `PIPELINE_NOT_CONFIGURED` (503), `PIPELINE_MODE=disabled` → `PIPELINE_DISABLED` (503).
+- `jobId` = id analisis. `pipelineMode`/`mode` dari env `PIPELINE_MODE` (enum kontrak tidak punya nilai "local"; set `aws` di deployment AWS).
+- Di mode wizard, jeda antar step (sebagian step selesai, tidak ada yang berjalan) dilaporkan `RUNNING` karena Run belum selesai.
+- Step yang menunggu slot (`MAX_CONCURRENT_JOBS`) berstatus `pending` / `QUEUED`. Batas ini berlaku untuk pipeline penuh dan step wizard.
+
+**Belum ada karena bergantung pada AWS/layanan lain:** registerFiles, startUpload, signParts, completeUpload, cancelUpload (S3 multipart), submit dan retry (FASTQ dari S3 + Job_Message SQS), autentikasi Cognito, role baca/tulis, pemisahan institusi, langganan, kuota, serta tabel transisi `DRAFT/UPLOADING/READY`.
+
 ### Endpoints Lain
 
 | Method | Endpoint | Deskripsi |
@@ -328,7 +375,7 @@ curl -X POST http://localhost:8001/api/pipeline/submit \
 | `GET` | `/api/pipeline/{id}/alignment/download` | Download BAM (post-markdup) |
 | `GET` | `/api/pipeline/{id}/variant-calling/download` | Download VCF (.vcf.gz) |
 | `GET` | `/api/references` | List referensi tersedia |
-| `GET` | `/api/health` | Health check |
+| `GET` | `/api/health` | Health check + hasil pemeriksaan tool (bcftools ≥ 1.21, samtools, Java 17, Nextflow, FastQC, Trimmomatic, BWA). `?refresh=true` mengulang pemeriksaan. `status: degraded` bila ada tool wajib yang kurang |
 | `DELETE` | `/api/pipeline/{id}` | Hapus job + file |
 
 ---
@@ -395,8 +442,11 @@ cat sample_L001_R2.fastq.gz sample_L002_R2.fastq.gz > sample_R2.fastq.gz
 
 ## 📌 Catatan Teknis
 
-- `samtools` dan `bcftools` pakai `/usr/bin/` (apt) — bukan conda
-- Pipeline di-test pada Nextflow 24.10.6, BCFTools 1.13, WSL2 Ubuntu 22.04
+- `samtools` pakai `/usr/bin/samtools` (apt) — bukan conda (versi conda gagal di `libcrypto`); `bcftools` pakai `/usr/local/bin/bcftools` (≥ 1.21)
+- Nextflow dijalankan dengan Java 17 (`NEXTFLOW_JAVA_HOME`) dan `NXF_VER` (`NEXTFLOW_VERSION`, default 24.10.4)
+- Pipeline di-test pada Nextflow 24.10.4, BCFTools 1.21, WSL2 Ubuntu 22.04
+- Coverage WES/Targeted dihitung dari `samtools depth -b {bed}` (persentase ≥10/20/30x terukur); WGS memakai `samtools coverage` (persentase diperkirakan dari mean depth)
+- `--sample_name` dikirim API ke Nextflow supaya nama folder hasil sama dengan yang dicari backend
 - Output VCF berformat `.vcf.gz` + `.tbi` (bgzipped + tabix indexed)
 - Variant ditandai `LOWQUAL` (tidak dihapus) bila tidak lolos filter
 - Work dir per job: `data/results/{job_id}/.work/` — aman untuk paralel

@@ -3,7 +3,7 @@
 Backend E2E pipeline NGS berbasis **BCFTools** dengan REST API.  
 Pipeline: `FastQC → Trimmomatic → BWA MEM → MarkDuplicates → BCFTools mpileup/call/norm/filter`
 
-Port default: **8001** | Versi: **1.2.0**
+Port default: **8001** | Versi: **1.1.0**
 
 ---
 
@@ -12,24 +12,29 @@ Port default: **8001** | Versi: **1.2.0**
 ```
 ngs_backend_bcftools/
 ├── api/
-│   ├── main.py             ← Endpoints + validasi parameter
+│   ├── main.py             ← Endpoints (pipeline penuh + wizard) + validasi parameter
+│   ├── contract.py         ← Endpoint API Contract: status, status batch, cancel
+│   ├── errors.py           ← Envelope error kontrak + exception handler
+│   ├── preflight.py        ← Cek tool/versi saat startup (/api/health)
 │   ├── models.py           ← Pydantic models + TrimPreset + CoverageStats
-│   ├── job_manager.py      ← Job state + recovery saat restart
-│   ├── pipeline_runner.py  ← Async Nextflow runner
+│   ├── job_manager.py      ← Job state, validasi ID, cancel, recovery saat restart
+│   ├── pipeline_runner.py  ← Async Nextflow runner (pipeline penuh + per step) + antrean
 │   └── config.py           ← Path & konfigurasi dari .env
 │
 ├── pipeline/
-│   ├── main.nf             ← Pipeline DSL2 (8 proses)
+│   ├── main.nf             ← Pipeline penuh DSL2 (/api/pipeline/submit)
+│   ├── main_wizard.nf      ← Entry per step: QC, TRIMMING, ALIGNMENT, VARIANT_CALLING
 │   └── nextflow.config     ← Default parameter pipeline
 │
 ├── scripts/
-│   └── setup.sh
+│   └── setup.sh            ← Install tool (build bcftools ≥ 1.21), env conda, folder data
 │
 ├── data/
 │   ├── uploads/
 │   ├── results/
 │   └── jobs/
 │
+├── test_wizard.html        ← UI uji wizard 5 langkah
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -133,8 +138,8 @@ Input: FASTQ (SE atau PE)
 
 | Tool | Versi | Fungsi | Instalasi |
 |---|---|---|---|
-| **Nextflow** | 24.10.6 | Workflow manager | conda |
-| **FastQC** | 0.11.x | Quality control reads | local binary |
+| **Nextflow** | 24.10.4 (dipin lewat `NXF_VER`) | Workflow manager, butuh Java 17 | conda + apt `openjdk-17` |
+| **FastQC** | 0.11.x | Quality control reads | conda (isi `FASTQC_PATH` di `.env`) |
 | **Trimmomatic** | 0.39 | Adapter & quality trimming | conda |
 | **BWA MEM** | 0.7.19 | Short read alignment | conda |
 | **Samtools** | 1.13 | Sort, index, markdup, coverage | apt `/usr/bin/` |
@@ -403,7 +408,7 @@ Bagian kontrak yang tidak butuh AWS (`api/contract.py`):
 | Streaming upload | ✅ | Chunk 1MB, tidak OOM |
 | Recovery saat restart | ✅ | Job running → failed |
 | Validasi ekstensi file | ✅ | `.fastq.gz`/`.fq.gz` only |
-| Docker profile | ✅ | bcftools v1.13 |
+| Docker profile | ⚠️ | Belum diuji dan kemungkinan tidak jalan: container bcftools masih v1.13 (butuh ≥ 1.21) dan API mengirim path tool dari host. Pakai profil `conda_env` |
 | Somatic calling | ❌ | Belum didukung |
 | Multi-lane | ❌ | Planned |
 | Autentikasi | ❌ | Planned (AWS Cognito) |
@@ -449,6 +454,7 @@ cat sample_L001_R2.fastq.gz sample_L002_R2.fastq.gz > sample_R2.fastq.gz
 - `--sample_name` dikirim API ke Nextflow supaya nama folder hasil sama dengan yang dicari backend
 - Output VCF berformat `.vcf.gz` + `.tbi` (bgzipped + tabix indexed)
 - Variant ditandai `LOWQUAL` (tidak dihapus) bila tidak lolos filter
-- Work dir per job: `data/results/{job_id}/.work/` — aman untuk paralel
+- Work dir per job: `data/results/{job_id}/.work/` (pipeline penuh) dan `.work_{step}/` (wizard) — aman untuk paralel
+- Log Nextflow per run: `data/results/{job_id}/.nextflow*.log`; report/timeline: `{step}_report.html`
 - `sample_sex` penting untuk diagnosis X-linked disease
 - `max_depth=0` di bcftools bukan unlimited — pipeline menggunakan 8000 sebagai unlimited

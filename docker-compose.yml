@@ -1,0 +1,43 @@
+# Backend NGS (BCFTools): API + pipeline dalam satu container.
+#
+#   REF_DIR=/path/ke/ref_genome docker compose up -d --build
+#   curl http://localhost:8001/api/health        # status harus "ok"
+#
+# REF_DIR = folder referensi genom di host (chr22.fa, hg38.fa, hg19.fa beserta .fai dan index BWA).
+# Referensi tidak masuk image karena ukurannya besar.
+services:
+  ngs-backend:
+    build: .
+    image: ngs-backend-bcftools:1.1.1
+    container_name: ngs-backend
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8001}:8001"
+    environment:
+      # Domain frontend yang boleh memanggil API (pisahkan dengan koma). Jangan "*" di production.
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+      # Mode yang dilaporkan ke frontend: disabled | mock | aws
+      PIPELINE_MODE: "${PIPELINE_MODE:-mock}"
+      # Batas job/step yang berjalan bersamaan dan thread per proses
+      MAX_CONCURRENT_JOBS: "${MAX_CONCURRENT_JOBS:-2}"
+      DEFAULT_THREADS: "${DEFAULT_THREADS:-4}"
+      # Batas sumber daya yang boleh diminta satu proses Nextflow. Sesuaikan dengan memori container;
+      # tanpa ini proses dengan permintaan 16 GB (BWA) tidak akan mulai di host berukuran kecil.
+      NGS_MAX_CPUS: "${NGS_MAX_CPUS:-4}"
+      NGS_MAX_MEMORY: "${NGS_MAX_MEMORY:-8 GB}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      # upload, hasil, dan state job (tahan restart container)
+      - ngs_data:/data
+      # referensi genom, read-only
+      - "${REF_DIR:-./ref_genome}:/data/ref_genome:ro"
+    # Batasi sesuai kebutuhan, mis.:  mem_limit: 24g   cpus: 8
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import json,sys,urllib.request as u; d=json.load(u.urlopen('http://127.0.0.1:8001/api/health', timeout=5)); sys.exit(0 if d.get('status')=='ok' else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  ngs_data:

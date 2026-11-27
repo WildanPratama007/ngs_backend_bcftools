@@ -1,0 +1,41 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadInputsSpecsRefs",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": [
+        "arn:aws:s3:::__BUCKET__/in/*",
+        "arn:aws:s3:::__BUCKET__/specs/*",
+        "arn:aws:s3:::__BUCKET__/refs/*",
+        "arn:aws:s3:::__BUCKET__/ref_genome/*",
+        "arn:aws:s3:::__BUCKET__/runs/*",
+        "arn:aws:s3:::__BUCKET__/reports/*",
+        "arn:aws:s3:::__BUCKET__/analyses/*"
+      ]
+    },
+    {
+      "Sid": "WriteResults",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:AbortMultipartUpload"],
+      "Resource": [
+        "arn:aws:s3:::__BUCKET__/runs/*",
+        "arn:aws:s3:::__BUCKET__/reports/*",
+        "arn:aws:s3:::__BUCKET__/analyses/*"
+      ]
+    },
+    {
+      "Sid": "ReplaceOldStepResults",
+      "Effect": "Allow",
+      "Action": "s3:DeleteObject",
+      "Resource": "arn:aws:s3:::__BUCKET__/analyses/*"
+    },
+    {
+      "Sid": "ListForClearErrorsAndCleanup",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::__BUCKET__"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "family": "ngs-worker-report",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "2048",
+  "memory": "4096",
+  "ephemeralStorage": { "sizeInGiB": 50 },
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "executionRoleArn": "arn:aws:iam::__ACCOUNT__:role/ngs-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::__ACCOUNT__:role/ngs-worker-task-role",
+  "containerDefinitions": [
+    {
+      "name": "worker",
+      "image": "__ECR__/ngs-backend-bcftools:1.3.0",
+      "essential": true,
+      "command": ["python", "-m", "worker", "report"],
+      "stopTimeout": 120,
+      "environment": [
+        { "name": "AWS_REGION", "value": "__REGION__" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ngs-worker",
+          "awslogs-region": "__REGION__",
+          "awslogs-stream-prefix": "report"
+        }
+      }
+    }
+  ]
+}

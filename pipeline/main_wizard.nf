@@ -25,7 +25,7 @@ def sanitizeName(String s) {
 
 process FASTQC {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/fastqc", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/fastqc", mode: params.publish_mode
 
     input:
     tuple val(sample_id), path(reads)
@@ -69,13 +69,13 @@ def polyGSetup() {
 
 process TRIMMOMATIC_SE {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/trimmed", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/trimmed", mode: params.publish_mode
 
     input:
     tuple val(sample_id), path(reads)
 
     output:
-    tuple val(sample_id), path("${sample_id}.trimmed.fastq"), val("SE")
+    tuple val(sample_id), path("${sample_id}.trimmed${params.trimmed_ext}"), val("SE")
 
     script:
     if (params.trim_adapter && !params.adapter_file) {
@@ -92,10 +92,11 @@ process TRIMMOMATIC_SE {
     """
     ${poly_g_setup}
     ${params.bin_dir}/trimmomatic SE -threads ${params.threads} \
-        "${reads}" "${sample_id}.trimmed.fastq" \
+        "${reads}" "${sample_id}.trimmed${params.trimmed_ext}" \
         ${trim_cmd} 2> trimmomatic.log || { cat trimmomatic.log >&2; exit 1; }
 
-    if [ ! -s "${sample_id}.trimmed.fastq" ]; then
+    nonempty() { case "\$1" in *.gz) [ -n "\$(gzip -dc "\$1" | head -c 1)" ];; *) [ -s "\$1" ];; esac; }
+    if ! nonempty "${sample_id}.trimmed${params.trimmed_ext}"; then
         INPUT=\$(grep -oP 'Input Reads: \\K\\d+' trimmomatic.log || echo 0)
         echo "ERROR: Trimmomatic menghasilkan 0 reads dari \${INPUT} reads input." >&2
         echo "ERROR: ${hint}" >&2
@@ -106,16 +107,16 @@ process TRIMMOMATIC_SE {
 
 process TRIMMOMATIC_PE {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/trimmed", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/trimmed", mode: params.publish_mode
 
     input:
     tuple val(sample_id), path(reads_r1), path(reads_r2)
 
     output:
     tuple val(sample_id),
-          path("${sample_id}_R1.trimmed.fastq"),
+          path("${sample_id}_R1.trimmed${params.trimmed_ext}"),
           path("${sample_id}_R1.unpaired.fastq"),
-          path("${sample_id}_R2.trimmed.fastq"),
+          path("${sample_id}_R2.trimmed${params.trimmed_ext}"),
           path("${sample_id}_R2.unpaired.fastq"),
           val("PE")
 
@@ -135,11 +136,12 @@ process TRIMMOMATIC_PE {
     ${poly_g_setup}
     ${params.bin_dir}/trimmomatic PE -threads ${params.threads} \
         "${reads_r1}" "${reads_r2}" \
-        "${sample_id}_R1.trimmed.fastq" "${sample_id}_R1.unpaired.fastq" \
-        "${sample_id}_R2.trimmed.fastq" "${sample_id}_R2.unpaired.fastq" \
+        "${sample_id}_R1.trimmed${params.trimmed_ext}" "${sample_id}_R1.unpaired.fastq" \
+        "${sample_id}_R2.trimmed${params.trimmed_ext}" "${sample_id}_R2.unpaired.fastq" \
         ${trim_cmd} 2> trimmomatic.log || { cat trimmomatic.log >&2; exit 1; }
 
-    if [ ! -s "${sample_id}_R1.trimmed.fastq" ]; then
+    nonempty() { case "\$1" in *.gz) [ -n "\$(gzip -dc "\$1" | head -c 1)" ];; *) [ -s "\$1" ];; esac; }
+    if ! nonempty "${sample_id}_R1.trimmed${params.trimmed_ext}"; then
         INPUT=\$(grep -oP 'Input Read Pairs: \\K\\d+' trimmomatic.log || echo 0)
         echo "ERROR: Trimmomatic (PE) menghasilkan 0 read pairs dari \${INPUT} pairs input." >&2
         echo "ERROR: ${hint}" >&2
@@ -150,7 +152,7 @@ process TRIMMOMATIC_PE {
 
 process BWA_ALIGN_SE {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/bwa", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/bwa", mode: params.publish_mode, enabled: params.publish_intermediate
 
     input:
     tuple val(sample_id), path(trimmed_reads), val(mode)
@@ -166,7 +168,7 @@ process BWA_ALIGN_SE {
         -t ${params.threads} \
         -R "@RG\\tID:${sample_id}.L001\\tSM:${sample_id}\\tPL:ILLUMINA\\tLB:${sample_id}\\tPU:${sample_id}.L001" \
         "${ref_genome}" "${trimmed_reads}" \
-        | ${params.samtools_bin} sort -@ ${params.threads} -m 4G \
+        | ${params.samtools_bin} sort -@ ${params.threads} -m ${params.sort_mem} \
           -o "${sample_id}.aligned.sorted.bam"
     ${params.samtools_bin} index "${sample_id}.aligned.sorted.bam"
     """
@@ -175,7 +177,7 @@ process BWA_ALIGN_SE {
 // Wizard: hanya pasangan trimmed (R1/R2); file unpaired tidak dipakai di alignment
 process BWA_ALIGN_PE {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/bwa", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/bwa", mode: params.publish_mode, enabled: params.publish_intermediate
 
     input:
     tuple val(sample_id), path(r1), path(r2), val(mode)
@@ -192,7 +194,7 @@ process BWA_ALIGN_PE {
         -R "@RG\\tID:${sample_id}.L001\\tSM:${sample_id}\\tPL:ILLUMINA\\tLB:${sample_id}\\tPU:${sample_id}.L001" \
         "${ref_genome}" "${r1}" "${r2}" \
         | ${params.samtools_bin} fixmate -m -@ ${params.threads} - - \
-        | ${params.samtools_bin} sort -@ ${params.threads} -m 4G \
+        | ${params.samtools_bin} sort -@ ${params.threads} -m ${params.sort_mem} \
           -o "${sample_id}.aligned.sorted.bam"
     ${params.samtools_bin} index "${sample_id}.aligned.sorted.bam"
     """
@@ -200,7 +202,7 @@ process BWA_ALIGN_PE {
 
 process MARKDUPLICATES {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/bwa", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/bwa", mode: params.publish_mode
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -230,13 +232,12 @@ process MARKDUPLICATES {
 // `samtools coverage -l` adalah min-read-length, BUKAN BED, jadi tidak bisa dipakai di sini.
 def targetCoverageScript(String samtools, String bed, String bam, String sample_id) {
     """
-    ${samtools} depth -a -b "${bed}" "${bam}" > depth_target.txt
-
-    python3 << 'PYEOF'
-import json
+    set -o pipefail
+    cat > depth_stats.py << 'PYEOF'
+import json, sys
 n = s = cov = c10 = c20 = c30 = 0
 hist = {}
-with open("depth_target.txt") as f:
+with sys.stdin as f:
     for line in f:
         d = int(line.rsplit(None, 1)[-1])
         n += 1; s += d
@@ -273,12 +274,13 @@ with open("${sample_id}.coverage.json", "w") as f:
 print("📊 COVERAGE: " + str(result["mean_depth"]) + "x | pct_bases_20x: " + str(result["pct_bases_20x"]) + "%")
 if result.get("warning"): print("⚠️  " + result["warning"])
 PYEOF
+    ${samtools} depth -a -b "${bed}" "${bam}" | python3 depth_stats.py
     """
 }
 
 process COVERAGE_STATS {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/bwa", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/bwa", mode: params.publish_mode
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -401,7 +403,7 @@ process CALL_VARIANTS {
 
 process GATHER_VCF {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/vcf", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/vcf", mode: params.publish_mode
 
     input:
     tuple val(sample_id), path(bcf_files), path(bcf_indexes)

@@ -1,0 +1,18 @@
+# Hanya api/, pipeline/, requirements.txt yang dibutuhkan image
+.git
+.gitignore
+.env
+.env.*
+data
+**/__pycache__
+**/*.pyc
+.nextflow*
+**/.nextflow
+**/work
+test_wizard.html
+scripts
+README.md
+*.md
+docker-compose.yml
+Dockerfile
+.dockerignore

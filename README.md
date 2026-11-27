@@ -3,7 +3,7 @@
 Backend E2E pipeline NGS berbasis **BCFTools** dengan REST API.  
 Pipeline: `FastQC → Trimmomatic → BWA MEM → MarkDuplicates → BCFTools mpileup/call/norm/filter`
 
-Port default: **8001** | Versi: **1.1.0**
+Port default: **8001** | Versi image/worker: **1.3.0**
 
 ---
 
@@ -34,6 +34,20 @@ ngs_backend_bcftools/
 │   ├── results/
 │   └── jobs/
 │
+├── worker/                 ← Task ECS sekali jalan (S3 → S3): report, trimming, alignment,
+│   │                         variant_calling, vcf
+│   ├── main.py             ← CLI: `python -m worker <task> [--spec-file] [--validate-only]`
+│   ├── spec.py             ← Model & validasi spesifikasi job (pydantic)
+│   ├── step_jobs.py        ← Worker per step wizard (trimming, alignment, variant_calling)
+│   ├── report_job.py       ← FastQC + summary.json
+│   ├── vcf_job.py          ← Pipeline penuh (main.nf)
+│   ├── s3io.py, status.py, nfcommon.py, resources.py, diskwatch.py, proc.py, config.py, errors.py
+│
+├── aws/                    ← Template: task definition ECS, IAM policy, lifecycle S3, contoh spec
+├── docs/
+│   ├── ECS_JOB_SPEC.md     ← Parameter job, hasil di S3, status.json, kode error
+│   └── AWS_SETUP.md        ← Panduan AWS CLI: bucket, ECR, IAM, cluster ECS, uji
+├── Dockerfile, docker-compose.yml
 ├── test_wizard.html        ← UI uji wizard 5 langkah
 ├── requirements.txt
 ├── .env.example
@@ -57,6 +71,101 @@ uvicorn api.main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
 Dokumentasi API interaktif: **http://localhost:8001/docs**
+
+---
+
+## ☁️ Worker ECS (FASTQ di S3 → VCF / Report di S3)
+
+Image yang sama bisa dijalankan sebagai **task sekali jalan** di ECS (tanpa server API): task membaca input dari S3, memprosesnya di disk sementara, menulis hasil ke S3, lalu berhenti. Setiap step wizard adalah **satu task sendiri**; antar step tidak ada koneksi langsung, hasilnya diserahkan lewat S3.
+
+| Command | Step wizard | Membaca | Menulis (di bawah `analysisPrefix`) |
+|---|---|---|---|
+| `python -m worker report` | 1. Upload & QC (FastQC) | FASTQ mentah | `qc/` |
+| `python -m worker trimming` | 2. Trimming | FASTQ mentah | `trimmed/` |
+| `python -m worker alignment` | 3. Alignment | `trimmed/` | `alignment/` (BAM markdup + coverage) |
+| `python -m worker variant_calling` | 4. Variant Calling | `alignment/` | `variants/` (VCF + tbi) |
+| `python -m worker vcf` | Pipeline penuh dalam satu task | FASTQ mentah | `output.prefix` (`vcf/`, `bam/`, `qc/`, `logs/`) |
+
+Step 1 dan 2 boleh berjalan bersamaan; 2 → 3 → 4 berurutan. Menjalankan sebuah step menghapus hasil step itu dan semua step di hilirnya. SE dan PE didukung; multi-lane belum.
+
+**Susunan S3 per analisis** (`analysisPrefix` = `s3://<bucket>/analyses/<id>/`, `<id>` = `jobId` pilihan Anda, mis. kode pasien anonim):
+
+```
+analyses/<id>/
+  qc/          status.json, summary.json, <file>_fastqc.html/.zip
+  trimmed/     status.json, stats.json, <sample>.trimmed.fastq.gz (PE: _R1/_R2), nextflow.log
+  alignment/   status.json, <sample>.markdup.bam + .bai, <sample>.coverage.json, <sample>.markdup.metrics.txt
+  variants/    status.json, <sample>.filtered.vcf.gz + .tbi
+```
+
+**Input dan parameter**
+- FASTQ: `.fastq.gz`, `.fq.gz`, `.fastq`, atau `.fq` (teks biasa boleh). BED (`.bed`) wajib untuk WES/Targeted.
+- Referensi (`GRCh38`, `GRCh37`, `GRCh38_chr22`) dibaca dari `REF_S3_PREFIX`, mis. `s3://<bucket>/ref_genome/` berisi `hg38.fa`, `.fai`, `.amb`, `.ann`, `.bwt`, `.pac`, `.sa`. Referensi tidak masuk image.
+- Parameter dikirim sebagai satu JSON (`JOB_SPEC_S3_URI` disarankan, atau `JOB_SPEC`). Nilai dan rentangnya sama dengan wizard (trimming, markdup, filter varian, `sample_sex`), tetapi `reference`, `analysisMode`, `bed`, `layout`, dan `sampleName` harus ditulis ulang di tiap step karena worker tidak menyimpan state.
+- Status tiap step ditulis ke `status.json` di foldernya (`RUNNING` / `SUCCEEDED` / `FAILED`, `errorCode`, metrik). Validasi spesifikasi tanpa menjalankan apa pun: `python -m worker <task> --validate-only --spec-file spec.json`.
+
+**Build dan push ke ECR** (tag saat ini `1.3.0`):
+
+```powershell
+docker build -t ngs-backend-bcftools:1.3.0 .
+docker tag ngs-backend-bcftools:1.3.0 <akun>.dkr.ecr.<region>.amazonaws.com/ngs-backend-bcftools:1.3.0
+aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <akun>.dkr.ecr.<region>.amazonaws.com
+docker push <akun>.dkr.ecr.<region>.amazonaws.com/ngs-backend-bcftools:1.3.0
+```
+
+Setelah push, daftarkan revisi task definition baru yang menunjuk tag itu (template di `aws/`, langkah lengkap di [docs/AWS_SETUP.md](docs/AWS_SETUP.md)). Jika `docker login` gagal menyimpan kredensial di Docker Desktop Windows ("stub received bad data"), lihat catatan pemecahan masalah di dokumen itu.
+
+**Status uji** (akun AWS Jakarta, `ap-southeast-3`, Fargate):
+
+| Diuji | Hasil |
+|---|---|
+| SE, referensi chr22, keempat step + pipeline penuh | Lulus |
+| WES (SE, BED), hg38 penuh, 300 ribu read | Lulus: 100% terpetakan, mean depth 18x di target |
+| WGS PE, hg38 penuh, 500 ribu pasang read (subset sampel nyata) | Lulus: 99,95% terpetakan, 98,6% properly paired |
+| FASTQ teks biasa (`.fastq`) di image `1.3.0` | Lulus (report dan trimming) |
+
+**Belum diuji / belum ada:**
+- Sampel WES atau WGS berukuran sungguhan (puluhan GB). Fargate hanya punya disk sementara maksimal 200 GiB, jadi ukuran besar butuh EC2 dengan EBS besar. Perkiraan disk (`DISK_FACTOR`) dan ukuran compute masih perkiraan.
+- Pemicu otomatis dari platform (Lambda/API yang memanggil `RunTask` per step), pembaca `status.json`, dan unggah FASTQ dari browser. Sekarang task dipicu manual lewat AWS CLI/konsol.
+- Multi-lane.
+
+Dokumentasi lengkap (field, rentang, layout S3, kode error, IAM, ukuran task, uji lokal): **[docs/ECS_JOB_SPEC.md](docs/ECS_JOB_SPEC.md)**. Panduan AWS dari nol: **[docs/AWS_SETUP.md](docs/AWS_SETUP.md)**.
+
+---
+
+## 🐳 Docker
+
+API dan pipeline berjalan dalam **satu container** (FastAPI + Nextflow dengan executor lokal). Image sudah memuat Java 17, Nextflow 24.10.4, BWA, samtools, **bcftools 1.21 (dibuild dari source)**, Trimmomatic, dan FastQC. Referensi genom tidak masuk image (besar), jadi dipasang sebagai volume.
+
+```bash
+# 1. Siapkan referensi di host: chr22.fa / hg38.fa / hg19.fa beserta .fai dan index BWA
+#    (lihat "Persiapan Referensi Genom")
+
+# 2. Build dan jalankan
+REF_DIR=/path/ke/ref_genome docker compose up -d --build
+
+# 3. Cek: status harus "ok"
+curl http://localhost:8001/api/health
+```
+
+| Variabel (env compose) | Default | Fungsi |
+|---|---|---|
+| `REF_DIR` | `./ref_genome` | Folder referensi di host → `/data/ref_genome` (read-only). Di Windows/WSL gunakan path yang bisa di-mount Docker |
+| `HOST_PORT` | `8001` | Port di host |
+| `CORS_ORIGINS` | `*` | Domain frontend, pisahkan dengan koma. **Isi di production** |
+| `PIPELINE_MODE` | `mock` | `disabled` / `mock` / `aws` (dilaporkan ke frontend) |
+| `MAX_CONCURRENT_JOBS` | `2` | Batas job/step yang berjalan bersamaan |
+| `DEFAULT_THREADS` | `4` | Thread per proses |
+| `NGS_MAX_CPUS`, `NGS_MAX_MEMORY` | `4`, `8 GB` | Batas yang boleh diminta satu proses Nextflow (BWA meminta 16 GB; permintaan dipangkas ke batas ini) |
+
+Catatan penting:
+- **Satu worker uvicorn saja.** Status job disimpan di memori proses. Jangan menambah `--workers` atau menjalankan lebih dari satu replika untuk data yang sama.
+- **Memori.** `NGS_MAX_MEMORY` tidak boleh melebihi memori yang diberikan ke container/Docker. Docker Desktop memberi 2 GB secara bawaan; naikkan (WGS membutuhkan jauh lebih besar) atau proses tidak akan mulai.
+- **Data** (`/data/uploads`, `/data/results`, `/data/jobs`) ada di volume `ngs_data` dan bertahan saat container di-restart. Job yang sedang berjalan saat restart ditandai `failed`.
+- Container berjalan sebagai user non-root (UID 1000). Untuk bind mount, pastikan folder bisa dibaca UID tersebut.
+- Nextflow memakai profil `local_tools` (tool dari PATH, tanpa conda). Profil `docker` lama (container per proses) belum diuji dan tidak dipakai.
+- Versi tool di image berasal dari apt Ubuntu 22.04: BWA 0.7.17, samtools 1.13, Trimmomatic 0.39, FastQC 0.11.9. Pada data uji kecil, angka coverage sama dengan pipeline di conda. Jumlah varian dan data skala besar belum dibandingkan.
+- Image tanpa autentikasi: letakkan di belakang reverse proxy/jaringan internal sampai autentikasi tersedia.
 
 ---
 
@@ -329,7 +438,7 @@ curl -X POST http://localhost:8001/api/pipeline/submit \
   -F "bed_file=@targets.bed"
 ```
 
-> File harus berekstensi `.fastq.gz` atau `.fq.gz`
+> Ekstensi yang diterima: `.fastq.gz`, `.fq.gz`, `.fastq`, `.fq` (pesan error validasi masih hanya menyebut `.gz`, tetapi file teks biasa lolos validasi)
 
 ### Wizard — Satu Step per Request
 
@@ -407,8 +516,13 @@ Bagian kontrak yang tidak butuh AWS (`api/contract.py`):
 | Work dir per job | ✅ | Tidak bentrok antar job paralel |
 | Streaming upload | ✅ | Chunk 1MB, tidak OOM |
 | Recovery saat restart | ✅ | Job running → failed |
-| Validasi ekstensi file | ✅ | `.fastq.gz`/`.fq.gz` only |
-| Docker profile | ⚠️ | Belum diuji dan kemungkinan tidak jalan: container bcftools masih v1.13 (butuh ≥ 1.21) dan API mengirim path tool dari host. Pakai profil `conda_env` |
+| Validasi ekstensi file | ✅ | `.fastq.gz`, `.fq.gz`, `.fastq`, `.fq` |
+| Image Docker (API + pipeline) | ✅ | Satu container, tool terpasang; lihat bagian Docker |
+| Worker ECS per step (SE/PE) | ✅ | `report`, `trimming`, `alignment`, `variant_calling`, `vcf`; teruji di AWS Jakarta dengan hg38 penuh pada data kecil |
+| Input FASTQ teks biasa | ✅ | API dan worker menerima `.fastq`/`.fq` selain `.fastq.gz`/`.fq.gz` (worker: huruf kecil saja) |
+| WES/WGS ukuran sungguhan di AWS | ⚠️ | Belum diuji; butuh EC2 + EBS besar |
+| Pemicu platform (Lambda, status, unggah) | ❌ | Di luar lingkup backend ini |
+| Nextflow profil `docker` (container per proses) | ⚠️ | Belum diuji dan kemungkinan tidak jalan: container bcftools masih v1.13 (butuh ≥ 1.21) dan API mengirim path tool dari host. Pakai profil `conda_env` |
 | Somatic calling | ❌ | Belum didukung |
 | Multi-lane | ❌ | Planned |
 | Autentikasi | ❌ | Planned (AWS Cognito) |

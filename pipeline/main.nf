@@ -26,7 +26,7 @@ def sanitizeName(String s) {
 
 process FASTQC {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/fastqc", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/fastqc", mode: params.publish_mode
     input:  tuple val(sample_id), path(reads)
     output: tuple val(sample_id), path("*_fastqc.html"), path("*_fastqc.zip")
     script:
@@ -61,7 +61,7 @@ def polyGSetup() {
 
 process TRIMMOMATIC_SE {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/trimmed", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/trimmed", mode: params.publish_mode, enabled: params.publish_intermediate
     input:  tuple val(sample_id), path(reads)
     output: tuple val(sample_id), path("${sample_id}.trimmed.fastq"), val("SE")
     script:
@@ -90,7 +90,7 @@ process TRIMMOMATIC_SE {
 
 process TRIMMOMATIC_PE {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/trimmed", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/trimmed", mode: params.publish_mode, enabled: params.publish_intermediate
     input:  tuple val(sample_id), path(reads_r1), path(reads_r2)
     output: tuple val(sample_id),
             path("${sample_id}_R1.trimmed.fastq"), path("${sample_id}_R1.unpaired.fastq"),
@@ -125,7 +125,7 @@ process TRIMMOMATIC_PE {
 
 process BWA_ALIGN_SE {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/bwa", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/bwa", mode: params.publish_mode, enabled: params.publish_intermediate
     input:  tuple val(sample_id), path(trimmed_reads), val(mode); path ref_genome; path ref_index
     output: tuple val(sample_id), path("${sample_id}.aligned.sorted.bam"), path("${sample_id}.aligned.sorted.bam.bai")
     script:
@@ -133,14 +133,14 @@ process BWA_ALIGN_SE {
     ${params.bin_dir}/bwa mem -t ${params.threads} \
         -R "@RG\\tID:${sample_id}.L001\\tSM:${sample_id}\\tPL:ILLUMINA\\tLB:${sample_id}\\tPU:${sample_id}.L001" \
         "${ref_genome}" "${trimmed_reads}" \
-        | ${params.samtools_bin} sort -@ ${params.threads} -m 4G -o "${sample_id}.aligned.sorted.bam"
+        | ${params.samtools_bin} sort -@ ${params.threads} -m ${params.sort_mem} -o "${sample_id}.aligned.sorted.bam"
     ${params.samtools_bin} index "${sample_id}.aligned.sorted.bam"
     """
 }
 
 process BWA_ALIGN_PE {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/bwa", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/bwa", mode: params.publish_mode, enabled: params.publish_intermediate
     input:  tuple val(sample_id), path(r1), path(r1u), path(r2), path(r2u), val(mode); path ref_genome; path ref_index
     output: tuple val(sample_id), path("${sample_id}.aligned.sorted.bam"), path("${sample_id}.aligned.sorted.bam.bai")
     script:
@@ -149,14 +149,14 @@ process BWA_ALIGN_PE {
         -R "@RG\\tID:${sample_id}.L001\\tSM:${sample_id}\\tPL:ILLUMINA\\tLB:${sample_id}\\tPU:${sample_id}.L001" \
         "${ref_genome}" "${r1}" "${r2}" \
         | ${params.samtools_bin} fixmate -m -@ ${params.threads} - - \
-        | ${params.samtools_bin} sort -@ ${params.threads} -m 4G -o "${sample_id}.aligned.sorted.bam"
+        | ${params.samtools_bin} sort -@ ${params.threads} -m ${params.sort_mem} -o "${sample_id}.aligned.sorted.bam"
     ${params.samtools_bin} index "${sample_id}.aligned.sorted.bam"
     """
 }
 
 process MARKDUPLICATES {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/bwa", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/bwa", mode: params.publish_mode
     input:  tuple val(sample_id), path(bam), path(bai)
     output: tuple val(sample_id), path("${sample_id}.markdup.bam"), path("${sample_id}.markdup.bam.bai")
             path "${sample_id}.markdup.metrics.txt"
@@ -179,13 +179,12 @@ process MARKDUPLICATES {
 // `samtools coverage -l` adalah min-read-length, BUKAN BED, jadi tidak bisa dipakai di sini.
 def targetCoverageScript(String samtools, String bed, String bam, String sample_id) {
     """
-    ${samtools} depth -a -b "${bed}" "${bam}" > depth_target.txt
-
-    python3 << 'PYEOF'
-import json
+    set -o pipefail
+    cat > depth_stats.py << 'PYEOF'
+import json, sys
 n = s = cov = c10 = c20 = c30 = 0
 hist = {}
-with open("depth_target.txt") as f:
+with sys.stdin as f:
     for line in f:
         d = int(line.rsplit(None, 1)[-1])
         n += 1; s += d
@@ -222,12 +221,13 @@ with open("${sample_id}.coverage.json", "w") as f:
 print("📊 COVERAGE: " + str(result["mean_depth"]) + "x | pct_bases_20x: " + str(result["pct_bases_20x"]) + "%")
 if result.get("warning"): print("⚠️  " + result["warning"])
 PYEOF
+    ${samtools} depth -a -b "${bed}" "${bam}" | python3 depth_stats.py
     """
 }
 
 process COVERAGE_STATS {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/bwa", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/bwa", mode: params.publish_mode
     input:  tuple val(sample_id), path(bam), path(bai)
     output: tuple val(sample_id), path("${sample_id}.coverage.json")
     script:
@@ -302,7 +302,7 @@ process CALL_VARIANTS {
 
 process GATHER_VCF {
     tag        "$sample_id"
-    publishDir "${params.outdir}/${sample_id}/vcf", mode: 'copy'
+    publishDir "${params.outdir}/${sample_id}/vcf", mode: params.publish_mode
     input:  tuple val(sample_id), path(bcf_files), path(bcf_indexes); path ref_genome
     output: tuple val(sample_id), path("${sample_id}.filtered.vcf.gz"), path("${sample_id}.filtered.vcf.gz.tbi")
     script:

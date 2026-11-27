@@ -1,0 +1,32 @@
+{
+  "family": "ngs-worker-trimming",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "4096",
+  "memory": "8192",
+  "ephemeralStorage": { "sizeInGiB": 50 },
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "executionRoleArn": "arn:aws:iam::__ACCOUNT__:role/ngs-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::__ACCOUNT__:role/ngs-worker-task-role",
+  "containerDefinitions": [
+    {
+      "name": "worker",
+      "image": "__ECR__/ngs-backend-bcftools:1.3.0",
+      "essential": true,
+      "command": ["python", "-m", "worker", "trimming"],
+      "stopTimeout": 120,
+      "environment": [
+        { "name": "AWS_REGION", "value": "__REGION__" },
+        { "name": "REF_S3_PREFIX", "value": "s3://__BUCKET__/ref_genome/" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ngs-worker",
+          "awslogs-region": "__REGION__",
+          "awslogs-stream-prefix": "trimming"
+        }
+      }
+    }
+  ]
+}

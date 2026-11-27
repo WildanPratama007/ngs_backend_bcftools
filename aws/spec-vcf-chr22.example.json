@@ -1,0 +1,11 @@
+{
+  "jobId": "vcf_001",
+  "input": {
+    "layout": "SINGLE",
+    "r1": "s3://__BUCKET__/in/latihan_S1_L001_R1_001.fastq.gz"
+  },
+  "output": { "prefix": "s3://__BUCKET__/runs/vcf_001/", "includeBam": true },
+  "reference": "GRCh38_chr22",
+  "analysisMode": "WGS",
+  "trimming": { "quality": 15, "adapterKit": "truseq_se" }
+}

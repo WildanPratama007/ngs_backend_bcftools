@@ -1,0 +1,8 @@
+{
+  "jobId": "rep_001",
+  "input": {
+    "layout": "SINGLE",
+    "r1": "s3://__BUCKET__/in/latihan_S1_L001_R1_001.fastq.gz"
+  },
+  "output": { "prefix": "s3://__BUCKET__/reports/rep_001/" }
+}
